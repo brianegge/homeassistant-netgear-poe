@@ -1,0 +1,9 @@
+{
+  "entity": {
+    "sensor": {
+      "poe_power": {
+        "default": "mdi:flash"
+      }
+    }
+  }
+}

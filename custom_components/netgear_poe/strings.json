@@ -1,0 +1,61 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Netgear PoE Switch",
+        "data": {
+          "host": "Host",
+          "community": "SNMP community",
+          "write_community": "SNMP write community"
+        },
+        "data_description": {
+          "host": "Hostname or IP address of the switch",
+          "community": "Read community string (SNMP v2c)",
+          "write_community": "Write community string (leave blank if same as read community)"
+        }
+      },
+      "reconfigure": {
+        "title": "Reconfigure Netgear PoE Switch",
+        "data": {
+          "host": "Host",
+          "community": "SNMP community",
+          "write_community": "SNMP write community"
+        },
+        "data_description": {
+          "host": "Hostname or IP address of the switch",
+          "community": "Read community string (SNMP v2c)",
+          "write_community": "Write community string (leave blank if same as read community)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to the switch over SNMP. Check that SNMP is enabled and the community string is correct."
+    },
+    "abort": {
+      "already_configured": "This switch is already configured",
+      "reconfigure_successful": "Reconfiguration was successful",
+      "unique_id_mismatch": "The host does not match the configured switch"
+    }
+  },
+  "exceptions": {
+    "connection_failed": {
+      "message": "Cannot connect to switch at {host} over SNMP: {error}"
+    },
+    "communication_error": {
+      "message": "Error communicating with switch at {host}: {error}"
+    },
+    "set_port_failed": {
+      "message": "Failed to set PoE state on port {port} of {host}: {error}"
+    },
+    "power_cycle_failed": {
+      "message": "Failed to power cycle port {port} of {host}: {error}"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "poe_power": {
+        "name": "PoE power"
+      }
+    }
+  }
+}
