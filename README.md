@@ -18,6 +18,13 @@ For each PoE port the integration creates:
   device is actually drawing power.
 - **Button** — power cycles the port using the switch's native PoE reset.
 
+With an SNMP community configured, you also get a per-port **link**
+binary sensor (`connectivity`) from IF-MIB `ifOperStatus`, polled every
+30 s. Enable **Listen for SNMP traps** and the integration also opens a
+trap receiver on UDP 162 and registers this host as a trap destination on
+the switch, so `linkUp`/`linkDown` events update the link sensors
+instantly (the poll remains a backstop for dropped UDP traps).
+
 Plus one **PoE power** sensor with the switch's total PoE draw in watts.
 
 ## Installation

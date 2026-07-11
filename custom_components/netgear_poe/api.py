@@ -237,16 +237,24 @@ class NetgearPoeApi:
     async def async_ensure_trap_destination(
         self, dest_ip: str, community: str
     ) -> None:
-        """Register a v2c trap destination on the switch (idempotent-ish).
+        """Register an enabled v2c trap destination on the switch.
 
-        The switch silently accepts duplicates, so this simply (re)adds the
-        destination. linkUpDown/PoE trap flags are left as configured on the
-        switch.
+        Field names/values match the switch's Trap Configuration form:
+        version 1 = SNMPv2, snmpStatus 1 = Enable. The switch tolerates a
+        duplicate recipient IP, so this is safe to call on every setup.
+        linkUpDown/PoE trap flags are left as configured on the switch.
         """
         await self._authed_request(
             "set.cgi",
             "snmp_trapConfgAdd",
-            form_body({"addr": dest_ip, "communityStr": community, "version": 2}),
+            form_body(
+                {
+                    "recipientsIP": dest_ip,
+                    "version": 1,
+                    "communityStr": community,
+                    "snmpStatus": 1,
+                }
+            ),
         )
 
     async def async_get_info(self) -> tuple[str, str]:
