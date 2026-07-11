@@ -196,9 +196,9 @@ class NetgearPoeApi:
             data.ports[port] = PoePort(
                 port=port,
                 admin_enabled=_row_enabled(row),
-                detection_status=str(
-                    row.get("status", row.get("portStatus", "unknown"))
-                ),
+                detection_status=_parse_lang_key(
+                    str(row.get("status", "unknown")), "txtPortStatus"
+                ).lower(),
                 power_watts=power,
                 raw=row,
             )
@@ -233,13 +233,25 @@ class NetgearPoeApi:
             raise NetgearError(f"PoE reset failed: {result}")
 
     async def async_get_info(self) -> tuple[str, str]:
-        """Return (name, model) from the pre-auth login info."""
-        result = await self._request("get.cgi", "home_login")
+        """Return (sysName, model) from the switch."""
+        result = await self._authed_request("get.cgi", "sys_info")
         data = result.get("data", {})
-        return str(data.get("sysName", "")), str(data.get("product", ""))
+        model = _parse_lang_key(str(data.get("sysProduct", "")), "txtModelDescp")
+        return str(data.get("sysName", "")), model
+
+    async def async_logout(self) -> None:
+        """Log out to free the switch's limited session slots."""
+        if self._xsid_header is None:
+            return
+        try:
+            await self._request("set.cgi", "home_logout", form_body({}))
+        except NetgearError:
+            _LOGGER.debug("Logout request failed", exc_info=True)
+        self._xsid_header = None
 
     async def async_close(self) -> None:
-        """Close the HTTP session if we own it."""
+        """Log out and close the HTTP session if we own it."""
+        await self.async_logout()
         if self._owns_session and self._session is not None:
             await self._session.close()
             self._session = None
@@ -272,16 +284,24 @@ def _row_enabled(row: dict[str, Any]) -> bool:
     return bool(int(state))
 
 
+def _parse_lang_key(value: str, prefix: str) -> str:
+    """Turn lang('poe','txtPortStatusDelivering') into 'Delivering'."""
+    if "'" not in value:
+        return value
+    key = value.rsplit("'", 2)[-2]
+    if key.startswith(prefix):
+        key = key[len(prefix) :]
+    return key
+
+
 def _row_power_watts(row: dict[str, Any]) -> float | None:
-    for key in ("power", "outputPower", "curPower"):
-        if key in row:
-            try:
-                value = float(str(row[key]).split()[0])
-            except (ValueError, IndexError):
-                return None
-            # Values above 1000 are milliwatts
-            return round(value / 1000, 1) if value > 1000 else value
-    return None
+    """Return port power in watts; the switch reports milliwatts."""
+    if "power" not in row:
+        return None
+    try:
+        return round(float(row["power"]) / 1000, 1)
+    except (TypeError, ValueError):
+        return None
 
 
 def _set_fields(raw: dict[str, Any], port: int) -> dict[str, Any]:

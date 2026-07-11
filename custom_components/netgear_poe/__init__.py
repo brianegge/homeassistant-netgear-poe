@@ -65,7 +65,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: NetgearPoeConfigEntry) -
 
     try:
         sys_name, model = await api.async_get_info()
-        await api.async_login()
     except NetgearAuthError as err:
         await api.async_close()
         raise ConfigEntryAuthFailed(str(err)) from err
