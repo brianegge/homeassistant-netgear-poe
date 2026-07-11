@@ -37,9 +37,8 @@ def test_form_body() -> None:
 
 def test_rsa_encrypt_round_trip() -> None:
     """Ciphertext decrypts to PKCS#1 v1.5 block type 2 with the message."""
-    # Small RSA key (p=61?) too small for padding; use 512-bit primes.
-    p = 0xF7E75FDC469067FFDC4E847C51F452DF
-    q = 0xE1CE0B309FBE4EB03DBC7EAF14A72DE3
+    p = 0xFF23A9D6B9106BAF7DA6F38110E51A6F
+    q = 0xF337357993B785BAB1CD1E47EC5ED635
     n = p * q
     e = 0x10001
     d = pow(e, -1, (p - 1) * (q - 1))
