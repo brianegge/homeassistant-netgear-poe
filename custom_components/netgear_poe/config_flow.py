@@ -10,13 +10,14 @@ from homeassistant.config_entries import ConfigFlowResult
 from homeassistant.const import CONF_HOST, CONF_PASSWORD
 
 from .api import NetgearAuthError, NetgearError, NetgearPoeApi
-from .const import CONF_COMMUNITY, DOMAIN
+from .const import CONF_COMMUNITY, CONF_ENABLE_TRAPS, DOMAIN
 
 USER_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_HOST): str,
         vol.Required(CONF_PASSWORD): str,
         vol.Optional(CONF_COMMUNITY, default=""): str,
+        vol.Optional(CONF_ENABLE_TRAPS, default=True): bool,
     }
 )
 
@@ -125,6 +126,10 @@ class NetgearPoeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_COMMUNITY,
                         default=reconfigure_entry.data.get(CONF_COMMUNITY, ""),
                     ): str,
+                    vol.Optional(
+                        CONF_ENABLE_TRAPS,
+                        default=reconfigure_entry.data.get(CONF_ENABLE_TRAPS, True),
+                    ): bool,
                 }
             ),
             errors=errors,

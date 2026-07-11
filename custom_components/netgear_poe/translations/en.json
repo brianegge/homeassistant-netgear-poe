@@ -6,12 +6,14 @@
         "data": {
           "host": "Host",
           "password": "Password",
-          "community": "SNMP community (optional)"
+          "community": "SNMP community (optional)",
+          "enable_traps": "Listen for SNMP traps"
         },
         "data_description": {
           "host": "Hostname or IP address of the switch",
           "password": "Admin password for the switch web interface",
-          "community": "Read community for port link sensors (leave blank to skip)"
+          "community": "Read community for port link sensors (leave blank to skip)",
+          "enable_traps": "Receive instant link/PoE events on UDP 162 and register this host as a trap destination on the switch"
         }
       },
       "reauth_confirm": {
@@ -26,12 +28,14 @@
         "data": {
           "host": "Host",
           "password": "Password",
-          "community": "SNMP community (optional)"
+          "community": "SNMP community (optional)",
+          "enable_traps": "Listen for SNMP traps"
         },
         "data_description": {
           "host": "Hostname or IP address of the switch",
           "password": "Admin password for the switch web interface",
-          "community": "Read community for port link sensors (leave blank to skip)"
+          "community": "Read community for port link sensors (leave blank to skip)",
+          "enable_traps": "Receive instant link/PoE events on UDP 162 and register this host as a trap destination on the switch"
         }
       }
     },

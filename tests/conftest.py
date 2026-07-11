@@ -27,6 +27,7 @@ MOCK_CONFIG = {
     "host": MOCK_HOST,
     "password": MOCK_PASSWORD,
     "community": MOCK_COMMUNITY,
+    "enable_traps": True,
 }
 MOCK_SYS_NAME = "boiler-switch"
 MOCK_MODEL = "GS728TPv2"
@@ -75,7 +76,35 @@ def mock_link_monitor() -> Generator[MagicMock]:
 
 
 @pytest.fixture
-def mock_api(mock_link_monitor: MagicMock) -> Generator[MagicMock]:
+def mock_trap_receiver() -> Generator[MagicMock]:
+    """Mock the SNMP trap receiver and source-IP lookup."""
+    with (
+        patch(
+            "custom_components.netgear_poe.SnmpTrapReceiver", autospec=True
+        ) as rx_class,
+        patch(
+            "custom_components.netgear_poe._get_source_ip",
+            return_value="192.168.254.30",
+        ),
+    ):
+        rx = rx_class.return_value
+        rx.async_start = AsyncMock()
+        rx.async_stop = AsyncMock()
+        # Expose the on_link_change callback passed at construction
+        rx_class.side_effect = lambda **kw: _store_callback(rx, kw)
+        yield rx
+
+
+def _store_callback(rx: MagicMock, kwargs: dict) -> MagicMock:
+    """Record the on_link_change callback so tests can invoke it."""
+    rx.on_link_change = kwargs.get("on_link_change")
+    return rx
+
+
+@pytest.fixture
+def mock_api(
+    mock_link_monitor: MagicMock, mock_trap_receiver: MagicMock
+) -> Generator[MagicMock]:
     """Mock the switch api for both __init__ and config_flow."""
     with (
         patch(
@@ -93,6 +122,7 @@ def mock_api(mock_link_monitor: MagicMock) -> Generator[MagicMock]:
         api.async_get_data = AsyncMock(return_value=make_poe_data())
         api.async_set_port_enabled = AsyncMock()
         api.async_power_cycle_port = AsyncMock()
+        api.async_ensure_trap_destination = AsyncMock()
         api.async_close = AsyncMock()
         yield api
 

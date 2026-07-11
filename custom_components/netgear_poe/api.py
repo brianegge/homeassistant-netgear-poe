@@ -234,6 +234,21 @@ class NetgearPoeApi:
         if result.get("status") != "ok":
             raise NetgearError(f"PoE reset failed: {result}")
 
+    async def async_ensure_trap_destination(
+        self, dest_ip: str, community: str
+    ) -> None:
+        """Register a v2c trap destination on the switch (idempotent-ish).
+
+        The switch silently accepts duplicates, so this simply (re)adds the
+        destination. linkUpDown/PoE trap flags are left as configured on the
+        switch.
+        """
+        await self._authed_request(
+            "set.cgi",
+            "snmp_trapConfgAdd",
+            form_body({"addr": dest_ip, "communityStr": community, "version": 2}),
+        )
+
     async def async_get_info(self) -> tuple[str, str]:
         """Return (sysName, model) from the switch."""
         result = await self._authed_request("get.cgi", "sys_info")
