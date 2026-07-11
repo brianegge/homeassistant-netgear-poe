@@ -7,7 +7,6 @@
   "integration_type": "device",
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/brianegge/homeassistant-netgear-poe/issues",
-  "loggers": ["pysnmp"],
-  "requirements": ["pysnmp==7.1.22"],
-  "version": "1.0.0"
+  "requirements": [],
+  "version": "2.0.0"
 }

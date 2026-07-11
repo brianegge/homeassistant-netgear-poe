@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 
 from homeassistant.components.button import ButtonEntity
@@ -11,8 +10,8 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import NetgearPoeConfigEntry, NetgearPoeCoordinator
-from .api import SnmpError
-from .const import DOMAIN, POWER_CYCLE_DELAY_SECONDS
+from .api import NetgearError
+from .const import DOMAIN
 from .entity import NetgearPoePortEntity
 
 _LOGGER = logging.getLogger(__name__)
@@ -34,7 +33,7 @@ async def async_setup_entry(
 
 
 class NetgearPoePowerCycleButton(NetgearPoePortEntity, ButtonEntity):
-    """Button that turns a PoE port off, waits, and turns it back on."""
+    """Button that power cycles a PoE port via the switch's native reset."""
 
     _attr_icon = "mdi:restart"
 
@@ -54,10 +53,8 @@ class NetgearPoePowerCycleButton(NetgearPoePortEntity, ButtonEntity):
         api = self.coordinator.api
         _LOGGER.info("Power cycling PoE port %d on %s", self._port, api.host)
         try:
-            await api.async_set_port_enabled(self._port, False)
-            await asyncio.sleep(POWER_CYCLE_DELAY_SECONDS)
-            await api.async_set_port_enabled(self._port, True)
-        except SnmpError as err:
+            await api.async_power_cycle_port(self._port)
+        except NetgearError as err:
             raise HomeAssistantError(
                 translation_domain=DOMAIN,
                 translation_key="power_cycle_failed",

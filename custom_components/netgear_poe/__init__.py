@@ -7,19 +7,13 @@ from dataclasses import dataclass
 from datetime import timedelta
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_HOST
+from homeassistant.const import CONF_HOST, CONF_PASSWORD
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .api import NetgearPoeApi, PoeData, SnmpError
-from .const import (
-    CONF_COMMUNITY,
-    CONF_WRITE_COMMUNITY,
-    DOMAIN,
-    PLATFORMS,
-    SCAN_INTERVAL_SECONDS,
-)
+from .api import NetgearAuthError, NetgearError, NetgearPoeApi, PoeData
+from .const import DOMAIN, PLATFORMS, SCAN_INTERVAL_SECONDS
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -31,14 +25,14 @@ class NetgearPoeRuntimeData:
     api: NetgearPoeApi
     coordinator: NetgearPoeCoordinator
     sys_name: str
-    sys_descr: str
+    model: str
 
 
 type NetgearPoeConfigEntry = ConfigEntry[NetgearPoeRuntimeData]
 
 
 class NetgearPoeCoordinator(DataUpdateCoordinator[PoeData]):
-    """Coordinator polling PoE state over SNMP."""
+    """Coordinator polling PoE state over the switch's web API."""
 
     def __init__(self, hass: HomeAssistant, api: NetgearPoeApi) -> None:
         super().__init__(
@@ -52,7 +46,9 @@ class NetgearPoeCoordinator(DataUpdateCoordinator[PoeData]):
     async def _async_update_data(self) -> PoeData:
         try:
             return await self.api.async_get_data()
-        except SnmpError as err:
+        except NetgearAuthError as err:
+            raise ConfigEntryAuthFailed(str(err)) from err
+        except NetgearError as err:
             raise UpdateFailed(
                 translation_domain=DOMAIN,
                 translation_key="communication_error",
@@ -64,13 +60,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: NetgearPoeConfigEntry) -
     """Set up Netgear PoE Switch from a config entry."""
     api = NetgearPoeApi(
         host=entry.data[CONF_HOST],
-        community=entry.data[CONF_COMMUNITY],
-        write_community=entry.data.get(CONF_WRITE_COMMUNITY, ""),
+        password=entry.data[CONF_PASSWORD],
     )
 
     try:
-        sys_name, sys_descr = await api.async_get_info()
-    except SnmpError as err:
+        sys_name, model = await api.async_get_info()
+        await api.async_login()
+    except NetgearAuthError as err:
+        await api.async_close()
+        raise ConfigEntryAuthFailed(str(err)) from err
+    except NetgearError as err:
         await api.async_close()
         raise ConfigEntryNotReady(
             translation_domain=DOMAIN,
@@ -85,7 +84,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: NetgearPoeConfigEntry) -
         api=api,
         coordinator=coordinator,
         sys_name=sys_name,
-        sys_descr=sys_descr,
+        model=model,
     )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)

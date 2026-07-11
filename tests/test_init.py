@@ -8,7 +8,7 @@ from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.netgear_poe.api import SnmpError
+from custom_components.netgear_poe.api import NetgearError
 
 from .conftest import setup_integration
 
@@ -25,7 +25,7 @@ async def test_setup_and_unload(
     # sensor from consumption_watts
     state = hass.states.get("sensor.boiler_switch_poe_power")
     assert state is not None
-    assert state.state == "42"
+    assert state.state == "42.0"
 
     assert await hass.config_entries.async_unload(mock_config_entry.entry_id)
     await hass.async_block_till_done()
@@ -39,7 +39,7 @@ async def test_setup_retries_when_unreachable(
     mock_config_entry: MockConfigEntry,
 ) -> None:
     """Test setup goes to retry when SNMP is down."""
-    mock_api.async_get_info.side_effect = SnmpError("timeout")
+    mock_api.async_get_info.side_effect = NetgearError("timeout")
     mock_config_entry.add_to_hass(hass)
 
     assert not await hass.config_entries.async_setup(mock_config_entry.entry_id)

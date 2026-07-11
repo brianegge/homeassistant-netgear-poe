@@ -21,24 +21,20 @@ def auto_enable_custom_integrations(hass: HomeAssistant) -> None:
 
 
 MOCK_HOST = "boiler-switch.home"
-MOCK_COMMUNITY = "mock-community"  # NOSONAR
+MOCK_PASSWORD = "mock-password"  # NOSONAR
 MOCK_CONFIG = {
     "host": MOCK_HOST,
-    "community": MOCK_COMMUNITY,
-    "write_community": "",
+    "password": MOCK_PASSWORD,
 }
 MOCK_SYS_NAME = "boiler-switch"
-MOCK_SYS_DESCR = (
-    "NETGEAR 24-Port Gigabit PoE+ Smart Managed Pro Switch with 4 SFP Ports "
-    "(GS728TPv2), Software Version 6.0.0.45"
-)
+MOCK_MODEL = "GS728TPv2"
 
 
 def make_poe_data(
     *,
     port_1_enabled: bool = True,
     port_2_enabled: bool = False,
-    consumption_watts: int | None = 42,
+    consumption_watts: float | None = 42.0,
 ) -> PoeData:
     """Create mock PoE data with two ports."""
     return PoeData(
@@ -46,25 +42,25 @@ def make_poe_data(
             1: PoePort(
                 port=1,
                 admin_enabled=port_1_enabled,
-                detection_status="delivering_power" if port_1_enabled else "disabled",
+                detection_status="delivering" if port_1_enabled else "disabled",
+                power_watts=6.5 if port_1_enabled else 0.0,
                 alias="driveway cam",
             ),
             2: PoePort(
                 port=2,
                 admin_enabled=port_2_enabled,
-                detection_status="delivering_power" if port_2_enabled else "disabled",
+                detection_status="delivering" if port_2_enabled else "disabled",
+                power_watts=0.0,
                 alias="",
             ),
         },
         consumption_watts=consumption_watts,
-        sys_name=MOCK_SYS_NAME,
-        sys_descr=MOCK_SYS_DESCR,
     )
 
 
 @pytest.fixture
 def mock_api() -> Generator[MagicMock]:
-    """Mock the SNMP api for both __init__ and config_flow."""
+    """Mock the switch api for both __init__ and config_flow."""
     with (
         patch(
             "custom_components.netgear_poe.NetgearPoeApi", autospec=True
@@ -76,9 +72,11 @@ def mock_api() -> Generator[MagicMock]:
     ):
         api = api_class.return_value
         api.host = MOCK_HOST
-        api.async_get_info = AsyncMock(return_value=(MOCK_SYS_NAME, MOCK_SYS_DESCR))
+        api.async_get_info = AsyncMock(return_value=(MOCK_SYS_NAME, MOCK_MODEL))
+        api.async_login = AsyncMock()
         api.async_get_data = AsyncMock(return_value=make_poe_data())
         api.async_set_port_enabled = AsyncMock()
+        api.async_power_cycle_port = AsyncMock()
         api.async_close = AsyncMock()
         yield api
 

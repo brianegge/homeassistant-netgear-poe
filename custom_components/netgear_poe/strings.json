@@ -5,41 +5,46 @@
         "title": "Netgear PoE Switch",
         "data": {
           "host": "Host",
-          "community": "SNMP community",
-          "write_community": "SNMP write community"
+          "password": "Password"
         },
         "data_description": {
           "host": "Hostname or IP address of the switch",
-          "community": "Read community string (SNMP v2c)",
-          "write_community": "Write community string (leave blank if same as read community)"
+          "password": "Admin password for the switch web interface"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Re-authenticate Netgear PoE Switch",
+        "description": "The switch rejected the password. Please update it.",
+        "data": {
+          "password": "Password"
         }
       },
       "reconfigure": {
         "title": "Reconfigure Netgear PoE Switch",
         "data": {
           "host": "Host",
-          "community": "SNMP community",
-          "write_community": "SNMP write community"
+          "password": "Password"
         },
         "data_description": {
           "host": "Hostname or IP address of the switch",
-          "community": "Read community string (SNMP v2c)",
-          "write_community": "Write community string (leave blank if same as read community)"
+          "password": "Admin password for the switch web interface"
         }
       }
     },
     "error": {
-      "cannot_connect": "Failed to connect to the switch over SNMP. Check that SNMP is enabled and the community string is correct."
+      "cannot_connect": "Failed to connect to the switch web interface",
+      "invalid_auth": "The switch rejected the password"
     },
     "abort": {
       "already_configured": "This switch is already configured",
+      "reauth_successful": "Re-authentication was successful",
       "reconfigure_successful": "Reconfiguration was successful",
       "unique_id_mismatch": "The host does not match the configured switch"
     }
   },
   "exceptions": {
     "connection_failed": {
-      "message": "Cannot connect to switch at {host} over SNMP: {error}"
+      "message": "Cannot connect to switch at {host}: {error}"
     },
     "communication_error": {
       "message": "Error communicating with switch at {host}: {error}"

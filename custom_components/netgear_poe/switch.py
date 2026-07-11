@@ -11,7 +11,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import NetgearPoeConfigEntry, NetgearPoeCoordinator
-from .api import SnmpError
+from .api import NetgearError
 from .const import DOMAIN
 from .entity import NetgearPoePortEntity
 
@@ -57,14 +57,14 @@ class NetgearPoePortSwitch(NetgearPoePortEntity, SwitchEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Return the detection status of the port."""
+        """Return the detection status and power draw of the port."""
         port_data = self.port_data
         if port_data is None:
             return {}
         return {
             "detection_status": port_data.detection_status,
+            "power_watts": port_data.power_watts,
             "port": self._port,
-            "alias": port_data.alias,
         }
 
     async def async_turn_on(self, **kwargs: Any) -> None:
@@ -78,7 +78,7 @@ class NetgearPoePortSwitch(NetgearPoePortEntity, SwitchEntity):
     async def _async_set_enabled(self, enabled: bool) -> None:
         try:
             await self.coordinator.api.async_set_port_enabled(self._port, enabled)
-        except SnmpError as err:
+        except NetgearError as err:
             raise HomeAssistantError(
                 translation_domain=DOMAIN,
                 translation_key="set_port_failed",

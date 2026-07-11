@@ -7,28 +7,29 @@ from typing import Any
 import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.config_entries import ConfigFlowResult
-from homeassistant.const import CONF_HOST
+from homeassistant.const import CONF_HOST, CONF_PASSWORD
 
-from .api import NetgearPoeApi, SnmpError
-from .const import (
-    CONF_COMMUNITY,
-    CONF_WRITE_COMMUNITY,
-    DEFAULT_COMMUNITY,
-    DOMAIN,
+from .api import NetgearAuthError, NetgearError, NetgearPoeApi
+from .const import DOMAIN
+
+USER_SCHEMA = vol.Schema(
+    {
+        vol.Required(CONF_HOST): str,
+        vol.Required(CONF_PASSWORD): str,
+    }
 )
 
 
-async def _validate_connection(
-    host: str, community: str, write_community: str
-) -> str:
-    """Connect, verify PoE ports exist, and return a title. Raises on failure."""
-    api = NetgearPoeApi(host=host, community=community, write_community=write_community)
+async def _validate_connection(host: str, password: str) -> str:
+    """Log in, verify PoE ports exist, and return a title. Raises on failure."""
+    api = NetgearPoeApi(host=host, password=password)
     try:
-        sys_name, _ = await api.async_get_info()
+        sys_name, model = await api.async_get_info()
+        await api.async_login()
         data = await api.async_get_data()
         if not data.ports:
-            raise SnmpError("No PoE ports found")
-        return sys_name or host
+            raise NetgearError("No PoE ports found")
+        return sys_name or model or host
     finally:
         await api.async_close()
 
@@ -38,6 +39,19 @@ class NetgearPoeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
 
+    async def _async_validate(
+        self, user_input: dict[str, Any], errors: dict[str, str]
+    ) -> str | None:
+        try:
+            return await _validate_connection(
+                user_input[CONF_HOST], user_input[CONF_PASSWORD]
+            )
+        except NetgearAuthError:
+            errors["base"] = "invalid_auth"
+        except NetgearError:
+            errors["base"] = "cannot_connect"
+        return None
+
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
@@ -45,35 +59,42 @@ class NetgearPoeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            host = user_input[CONF_HOST]
-            community = user_input[CONF_COMMUNITY]
-            write_community = user_input.get(CONF_WRITE_COMMUNITY, "")
-
-            try:
-                title = await _validate_connection(host, community, write_community)
-            except SnmpError:
-                errors["base"] = "cannot_connect"
-            else:
-                await self.async_set_unique_id(host)
+            title = await self._async_validate(user_input, errors)
+            if title is not None:
+                await self.async_set_unique_id(user_input[CONF_HOST])
                 self._abort_if_unique_id_configured()
-                return self.async_create_entry(
-                    title=title,
-                    data={
-                        CONF_HOST: host,
-                        CONF_COMMUNITY: community,
-                        CONF_WRITE_COMMUNITY: write_community,
-                    },
+                return self.async_create_entry(title=title, data=user_input)
+
+        return self.async_show_form(
+            step_id="user", data_schema=USER_SCHEMA, errors=errors
+        )
+
+    async def async_step_reauth(
+        self, entry_data: dict[str, Any]
+    ) -> ConfigFlowResult:
+        """Handle reauthorization when the password changes."""
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Handle reauth confirmation."""
+        errors: dict[str, str] = {}
+        reauth_entry = self._get_reauth_entry()
+
+        if user_input is not None:
+            full_input = {
+                CONF_HOST: reauth_entry.data[CONF_HOST],
+                CONF_PASSWORD: user_input[CONF_PASSWORD],
+            }
+            if await self._async_validate(full_input, errors) is not None:
+                return self.async_update_reload_and_abort(
+                    reauth_entry, data=full_input
                 )
 
         return self.async_show_form(
-            step_id="user",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(CONF_HOST): str,
-                    vol.Required(CONF_COMMUNITY, default=DEFAULT_COMMUNITY): str,
-                    vol.Optional(CONF_WRITE_COMMUNITY, default=""): str,
-                }
-            ),
+            step_id="reauth_confirm",
+            data_schema=vol.Schema({vol.Required(CONF_PASSWORD): str}),
             errors=errors,
         )
 
@@ -85,24 +106,11 @@ class NetgearPoeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         reconfigure_entry = self._get_reconfigure_entry()
 
         if user_input is not None:
-            host = user_input[CONF_HOST]
-            community = user_input[CONF_COMMUNITY]
-            write_community = user_input.get(CONF_WRITE_COMMUNITY, "")
-
-            try:
-                await _validate_connection(host, community, write_community)
-            except SnmpError:
-                errors["base"] = "cannot_connect"
-            else:
-                await self.async_set_unique_id(host)
+            if await self._async_validate(user_input, errors) is not None:
+                await self.async_set_unique_id(user_input[CONF_HOST])
                 self._abort_if_unique_id_mismatch()
                 return self.async_update_reload_and_abort(
-                    reconfigure_entry,
-                    data={
-                        CONF_HOST: host,
-                        CONF_COMMUNITY: community,
-                        CONF_WRITE_COMMUNITY: write_community,
-                    },
+                    reconfigure_entry, data=user_input
                 )
 
         return self.async_show_form(
@@ -112,16 +120,7 @@ class NetgearPoeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required(
                         CONF_HOST, default=reconfigure_entry.data.get(CONF_HOST)
                     ): str,
-                    vol.Required(
-                        CONF_COMMUNITY,
-                        default=reconfigure_entry.data.get(
-                            CONF_COMMUNITY, DEFAULT_COMMUNITY
-                        ),
-                    ): str,
-                    vol.Optional(
-                        CONF_WRITE_COMMUNITY,
-                        default=reconfigure_entry.data.get(CONF_WRITE_COMMUNITY, ""),
-                    ): str,
+                    vol.Required(CONF_PASSWORD): str,
                 }
             ),
             errors=errors,

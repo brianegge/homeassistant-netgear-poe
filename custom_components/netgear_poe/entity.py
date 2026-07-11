@@ -24,7 +24,7 @@ class NetgearPoeEntity(CoordinatorEntity[NetgearPoeCoordinator]):
             identifiers={(DOMAIN, entry.entry_id)},
             name=entry.runtime_data.sys_name or entry.title,
             manufacturer="Netgear",
-            model=_model_from_descr(entry.runtime_data.sys_descr),
+            model=entry.runtime_data.model or None,
             configuration_url=f"http://{coordinator.api.host}/",
         )
 
@@ -58,13 +58,3 @@ class NetgearPoePortEntity(NetgearPoeEntity):
         if port_data is not None and port_data.alias:
             return f"Port {self._port} ({port_data.alias})"
         return f"Port {self._port}"
-
-
-def _model_from_descr(sys_descr: str) -> str:
-    """Extract a model name like 'GS728TPv2' from sysDescr."""
-    for token in sys_descr.replace("(", " ").replace(")", " ").split():
-        if token.startswith(("GS", "MS", "XS", "JGS")) and any(
-            ch.isdigit() for ch in token
-        ):
-            return token
-    return sys_descr[:40] if sys_descr else "PoE Switch"

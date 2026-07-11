@@ -9,7 +9,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.netgear_poe.api import SnmpError
+from custom_components.netgear_poe.api import NetgearError
 
 from .conftest import setup_integration
 
@@ -28,9 +28,9 @@ async def test_switch_states(
     state = hass.states.get(PORT_1_ENTITY)
     assert state is not None
     assert state.state == "on"
-    assert state.attributes["detection_status"] == "delivering_power"
+    assert state.attributes["detection_status"] == "delivering"
     assert state.attributes["port"] == 1
-    assert state.attributes["alias"] == "driveway cam"
+    assert state.attributes["power_watts"] == 6.5
 
     state = hass.states.get(PORT_2_ENTITY)
     assert state is not None
@@ -78,7 +78,7 @@ async def test_switch_set_failure(
 ) -> None:
     """Test SNMP set failure raises a HomeAssistantError."""
     await setup_integration(hass, mock_config_entry)
-    mock_api.async_set_port_enabled.side_effect = SnmpError("noAccess")
+    mock_api.async_set_port_enabled.side_effect = NetgearError("noAccess")
 
     with pytest.raises(HomeAssistantError):
         await hass.services.async_call(
