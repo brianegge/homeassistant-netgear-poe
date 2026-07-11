@@ -64,6 +64,7 @@ class NetgearPoePortSwitch(NetgearPoePortEntity, SwitchEntity):
         return {
             "detection_status": port_data.detection_status,
             "power_watts": port_data.power_watts,
+            "link_up": self.coordinator.data.link.get(self._port),
             "port": self._port,
         }
 

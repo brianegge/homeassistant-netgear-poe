@@ -5,11 +5,13 @@
         "title": "Netgear PoE Switch",
         "data": {
           "host": "Host",
-          "password": "Password"
+          "password": "Password",
+          "community": "SNMP community (optional)"
         },
         "data_description": {
           "host": "Hostname or IP address of the switch",
-          "password": "Admin password for the switch web interface"
+          "password": "Admin password for the switch web interface",
+          "community": "Read community for port link sensors (leave blank to skip)"
         }
       },
       "reauth_confirm": {
@@ -23,11 +25,13 @@
         "title": "Reconfigure Netgear PoE Switch",
         "data": {
           "host": "Host",
-          "password": "Password"
+          "password": "Password",
+          "community": "SNMP community (optional)"
         },
         "data_description": {
           "host": "Hostname or IP address of the switch",
-          "password": "Admin password for the switch web interface"
+          "password": "Admin password for the switch web interface",
+          "community": "Read community for port link sensors (leave blank to skip)"
         }
       }
     },

@@ -88,6 +88,8 @@ class PoeData:
 
     ports: dict[int, PoePort] = field(default_factory=dict)
     consumption_watts: float | None = None
+    # Per-port link state from SNMP; empty when SNMP is unavailable
+    link: dict[int, bool] = field(default_factory=dict)
 
 
 class NetgearPoeApi:

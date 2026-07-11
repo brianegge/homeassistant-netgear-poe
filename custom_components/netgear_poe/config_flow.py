@@ -10,12 +10,13 @@ from homeassistant.config_entries import ConfigFlowResult
 from homeassistant.const import CONF_HOST, CONF_PASSWORD
 
 from .api import NetgearAuthError, NetgearError, NetgearPoeApi
-from .const import DOMAIN
+from .const import CONF_COMMUNITY, DOMAIN
 
 USER_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_HOST): str,
         vol.Required(CONF_PASSWORD): str,
+        vol.Optional(CONF_COMMUNITY, default=""): str,
     }
 )
 
@@ -83,7 +84,7 @@ class NetgearPoeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             full_input = {
-                CONF_HOST: reauth_entry.data[CONF_HOST],
+                **reauth_entry.data,
                 CONF_PASSWORD: user_input[CONF_PASSWORD],
             }
             if await self._async_validate(full_input, errors) is not None:
@@ -120,6 +121,10 @@ class NetgearPoeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_HOST, default=reconfigure_entry.data.get(CONF_HOST)
                     ): str,
                     vol.Required(CONF_PASSWORD): str,
+                    vol.Optional(
+                        CONF_COMMUNITY,
+                        default=reconfigure_entry.data.get(CONF_COMMUNITY, ""),
+                    ): str,
                 }
             ),
             errors=errors,

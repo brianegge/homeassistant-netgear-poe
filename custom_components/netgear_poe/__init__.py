@@ -13,7 +13,8 @@ from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import NetgearAuthError, NetgearError, NetgearPoeApi, PoeData
-from .const import DOMAIN, PLATFORMS, SCAN_INTERVAL_SECONDS
+from .const import CONF_COMMUNITY, DOMAIN, PLATFORMS, SCAN_INTERVAL_SECONDS
+from .snmp import SnmpLinkMonitor
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -26,6 +27,7 @@ class NetgearPoeRuntimeData:
     coordinator: NetgearPoeCoordinator
     sys_name: str
     model: str
+    link_monitor: SnmpLinkMonitor | None
 
 
 type NetgearPoeConfigEntry = ConfigEntry[NetgearPoeRuntimeData]
@@ -34,7 +36,12 @@ type NetgearPoeConfigEntry = ConfigEntry[NetgearPoeRuntimeData]
 class NetgearPoeCoordinator(DataUpdateCoordinator[PoeData]):
     """Coordinator polling PoE state over the switch's web API."""
 
-    def __init__(self, hass: HomeAssistant, api: NetgearPoeApi) -> None:
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        api: NetgearPoeApi,
+        link_monitor: SnmpLinkMonitor | None,
+    ) -> None:
         super().__init__(
             hass,
             _LOGGER,
@@ -42,10 +49,11 @@ class NetgearPoeCoordinator(DataUpdateCoordinator[PoeData]):
             update_interval=timedelta(seconds=SCAN_INTERVAL_SECONDS),
         )
         self.api = api
+        self.link_monitor = link_monitor
 
     async def _async_update_data(self) -> PoeData:
         try:
-            return await self.api.async_get_data()
+            data = await self.api.async_get_data()
         except NetgearAuthError as err:
             raise ConfigEntryAuthFailed(str(err)) from err
         except NetgearError as err:
@@ -54,6 +62,9 @@ class NetgearPoeCoordinator(DataUpdateCoordinator[PoeData]):
                 translation_key="communication_error",
                 translation_placeholders={"host": self.api.host, "error": str(err)},
             ) from err
+        if self.link_monitor is not None:
+            data.link = await self.link_monitor.async_get_link_states()
+        return data
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: NetgearPoeConfigEntry) -> bool:
@@ -76,7 +87,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: NetgearPoeConfigEntry) -
             translation_placeholders={"host": entry.data[CONF_HOST], "error": str(err)},
         ) from err
 
-    coordinator = NetgearPoeCoordinator(hass, api)
+    link_monitor: SnmpLinkMonitor | None = None
+    if community := entry.data.get(CONF_COMMUNITY):
+        link_monitor = SnmpLinkMonitor(entry.data[CONF_HOST], community)
+
+    coordinator = NetgearPoeCoordinator(hass, api, link_monitor)
     await coordinator.async_config_entry_first_refresh()
 
     entry.runtime_data = NetgearPoeRuntimeData(
@@ -84,6 +99,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: NetgearPoeConfigEntry) -
         coordinator=coordinator,
         sys_name=sys_name,
         model=model,
+        link_monitor=link_monitor,
     )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -97,4 +113,6 @@ async def async_unload_entry(
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
         await entry.runtime_data.api.async_close()
+        if entry.runtime_data.link_monitor is not None:
+            await entry.runtime_data.link_monitor.async_close()
     return unload_ok

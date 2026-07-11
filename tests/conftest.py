@@ -22,9 +22,11 @@ def auto_enable_custom_integrations(hass: HomeAssistant) -> None:
 
 MOCK_HOST = "boiler-switch.home"
 MOCK_PASSWORD = "mock-password"  # NOSONAR
+MOCK_COMMUNITY = "mock-community"
 MOCK_CONFIG = {
     "host": MOCK_HOST,
     "password": MOCK_PASSWORD,
+    "community": MOCK_COMMUNITY,
 }
 MOCK_SYS_NAME = "boiler-switch"
 MOCK_MODEL = "GS728TPv2"
@@ -59,7 +61,21 @@ def make_poe_data(
 
 
 @pytest.fixture
-def mock_api() -> Generator[MagicMock]:
+def mock_link_monitor() -> Generator[MagicMock]:
+    """Mock the SNMP link monitor."""
+    with patch(
+        "custom_components.netgear_poe.SnmpLinkMonitor", autospec=True
+    ) as monitor_class:
+        monitor = monitor_class.return_value
+        monitor.async_get_link_states = AsyncMock(
+            return_value={1: True, 2: False}
+        )
+        monitor.async_close = AsyncMock()
+        yield monitor
+
+
+@pytest.fixture
+def mock_api(mock_link_monitor: MagicMock) -> Generator[MagicMock]:
     """Mock the switch api for both __init__ and config_flow."""
     with (
         patch(
