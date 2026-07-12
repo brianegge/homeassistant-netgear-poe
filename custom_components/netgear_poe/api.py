@@ -107,6 +107,8 @@ class NetgearPoeApi:
         self._owns_session = session is None
         self._xsid_header: str | None = None
         self._login_lock = asyncio.Lock()
+        self._port_names: dict[int, str] = {}
+        self._poll_count = 0
 
     def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None:
@@ -179,12 +181,33 @@ class NetgearPoeApi:
                 raise NetgearAuthError(f"Re-login failed for {cmd}: {result}")
         return result
 
+    async def _async_fetch_port_names(self) -> dict[int, str]:
+        """Return {port: assigned description} from the port config page."""
+        result = await self._authed_request("get.cgi", "port_port")
+        rows = result.get("data", {}).get("ports", [])
+        names: dict[int, str] = {}
+        for index, row in enumerate(rows):
+            port = int(row.get("ifindex", index + 1))
+            descp = str(row.get("descp", "")).strip()
+            if descp:
+                names[port] = descp
+        return names
+
     async def async_get_data(self) -> PoeData:
         """Fetch PoE state for all ports."""
         result = await self._authed_request("get.cgi", "poe_port")
         rows = _port_rows(result)
         if not rows:
             raise NetgearError(f"No PoE ports in poe_port response: {result}")
+
+        # Port names rarely change; refresh them on the first poll and
+        # occasionally thereafter to pick up renames without a reload.
+        if not self._port_names or self._poll_count % 20 == 0:
+            try:
+                self._port_names = await self._async_fetch_port_names()
+            except NetgearError:
+                _LOGGER.debug("Could not fetch port names", exc_info=True)
+        self._poll_count += 1
 
         data = PoeData()
         total = 0.0
@@ -202,6 +225,7 @@ class NetgearPoeApi:
                     str(row.get("status", "unknown")), "txtPortStatus"
                 ).lower(),
                 power_watts=power,
+                alias=self._port_names.get(port, ""),
                 raw=row,
             )
         if have_power:

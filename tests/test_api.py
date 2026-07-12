@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from base64 import b64decode
+from unittest.mock import AsyncMock
 
 from custom_components.netgear_poe.api import (
+    NetgearPoeApi,
     encode_password,
     form_body,
     rsa_encrypt,
@@ -54,3 +56,28 @@ def test_rsa_encrypt_round_trip() -> None:
     assert block.endswith(b"\x00" + message.encode())
     padding = block[2 : -len(message) - 1]
     assert 0 not in padding
+
+
+async def test_get_data_populates_port_names() -> None:
+    """async_get_data merges assigned descriptions from port_port as aliases."""
+    api = NetgearPoeApi("host", "pw")
+
+    async def fake_request(cgi: str, cmd: str, body: str | None = None) -> dict:
+        if cmd == "poe_port":
+            return {"data": {"ports": [
+                {"state": 1, "status": "lang('poe','txtPortStatusDelivering')", "power": 6500},
+                {"state": 0, "status": "lang('poe','txtPortStatusSearching')", "power": 0},
+            ]}}
+        if cmd == "port_port":
+            return {"data": {"ports": [
+                {"ifindex": 1, "descp": "garage-cam"},
+                {"ifindex": 2, "descp": ""},
+            ]}}
+        raise AssertionError(cmd)
+
+    api._authed_request = AsyncMock(side_effect=fake_request)
+    data = await api.async_get_data()
+
+    assert data.ports[1].alias == "garage-cam"
+    assert data.ports[2].alias == ""
+    assert data.consumption_watts == 6.5
