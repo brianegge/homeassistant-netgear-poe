@@ -156,10 +156,21 @@ async def _async_run_discovery(hass: HomeAssistant) -> None:
     except Exception:  # noqa: BLE001 - never let discovery kill the loop
         _LOGGER.debug("NSDP discovery scan failed", exc_info=True)
         return
+    _LOGGER.debug(
+        "NSDP scan found %d switch(es): %s",
+        len(switches),
+        ", ".join(f"{s.name}/{s.model}" for s in switches),
+    )
     for switch in switches:
         # Only offer switches this integration's web API can actually drive.
         if not switch.is_pro or format_mac(switch.mac) in configured:
             continue
+        _LOGGER.info(
+            "NSDP discovered %s (%s) at %s — offering setup",
+            switch.name or switch.mac,
+            switch.model,
+            switch.host,
+        )
         discovery_flow.async_create_flow(
             hass,
             DOMAIN,
