@@ -1,0 +1,30 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Install dependencies
+        run: pip install -r requirements.test.txt
+      - name: Run tests
+        run: pytest --cov=custom_components.netgear_poe --cov-report=xml
+      - name: Upload coverage
+        uses: codecov/codecov-action@v6
+        with:
+          files: coverage.xml
+          fail_ci_if_error: false
+      - name: Upload coverage for SonarCloud
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage
+          path: coverage.xml

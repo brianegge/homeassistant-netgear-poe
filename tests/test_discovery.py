@@ -11,7 +11,11 @@ from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.netgear_poe.const import DOMAIN
-from custom_components.netgear_poe.nsdp import NsdpSwitch, _build_request, _parse_response
+from custom_components.netgear_poe.nsdp import (
+    NsdpSwitch,
+    _build_request,
+    _parse_response,
+)
 
 from .conftest import MOCK_SYS_NAME
 
@@ -79,12 +83,12 @@ async def test_discovery_flow_creates_entry(
 
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"],
-        user_input={"password": "Password1", "community": "egge"},
+        user_input={"password": "test-password", "community": "test-community"},
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["title"] == MOCK_SYS_NAME
     assert result["data"]["host"] == "192.168.254.250"
-    assert result["data"]["password"] == "Password1"
+    assert result["data"]["password"] == "test-password"
 
 
 async def test_discovery_flow_dedupes_configured(
@@ -122,9 +126,7 @@ async def test_scanner_offers_only_pro_switches(hass: HomeAssistant) -> None:
     created: list[dict] = []
 
     with (
-        patch(
-            "custom_components.netgear_poe.async_discover", return_value=switches
-        ),
+        patch("custom_components.netgear_poe.async_discover", return_value=switches),
         patch(
             "custom_components.netgear_poe.discovery_flow.async_create_flow",
             side_effect=lambda h, d, *, context, data: created.append(data),

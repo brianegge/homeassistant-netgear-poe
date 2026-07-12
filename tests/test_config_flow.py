@@ -53,9 +53,7 @@ async def test_user_flow_cannot_connect(
     assert result["type"] is FlowResultType.CREATE_ENTRY
 
 
-async def test_user_flow_invalid_auth(
-    hass: HomeAssistant, mock_api: MagicMock
-) -> None:
+async def test_user_flow_invalid_auth(hass: HomeAssistant, mock_api: MagicMock) -> None:
     """Test a wrong password shows invalid_auth."""
     mock_api.async_get_info.side_effect = NetgearAuthError("bad password")
 

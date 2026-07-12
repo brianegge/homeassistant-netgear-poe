@@ -82,8 +82,7 @@ class NetgearPoeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._abort_if_unique_id_configured(updates={CONF_HOST: host})
         # Also skip if the same host was already added manually.
         if any(
-            entry.data.get(CONF_HOST) == host
-            for entry in self._async_current_entries()
+            entry.data.get(CONF_HOST) == host for entry in self._async_current_entries()
         ):
             return self.async_abort(reason="already_configured")
 
@@ -128,9 +127,7 @@ class NetgearPoeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
-    async def async_step_reauth(
-        self, entry_data: dict[str, Any]
-    ) -> ConfigFlowResult:
+    async def async_step_reauth(self, entry_data: dict[str, Any]) -> ConfigFlowResult:
         """Handle reauthorization when the password changes."""
         return await self.async_step_reauth_confirm()
 
@@ -147,9 +144,7 @@ class NetgearPoeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_PASSWORD: user_input[CONF_PASSWORD],
             }
             if await self._async_validate(full_input, errors) is not None:
-                return self.async_update_reload_and_abort(
-                    reauth_entry, data=full_input
-                )
+                return self.async_update_reload_and_abort(reauth_entry, data=full_input)
 
         return self.async_show_form(
             step_id="reauth_confirm",
@@ -164,13 +159,14 @@ class NetgearPoeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
         reconfigure_entry = self._get_reconfigure_entry()
 
-        if user_input is not None:
-            if await self._async_validate(user_input, errors) is not None:
-                await self.async_set_unique_id(user_input[CONF_HOST])
-                self._abort_if_unique_id_mismatch()
-                return self.async_update_reload_and_abort(
-                    reconfigure_entry, data=user_input
-                )
+        if user_input is not None and (
+            await self._async_validate(user_input, errors) is not None
+        ):
+            await self.async_set_unique_id(user_input[CONF_HOST])
+            self._abort_if_unique_id_mismatch()
+            return self.async_update_reload_and_abort(
+                reconfigure_entry, data=user_input
+            )
 
         return self.async_show_form(
             step_id="reconfigure",

@@ -36,7 +36,7 @@ class SnmpTrapReceiver:
         community: str,
         on_link_change: Callable[[int, bool], None],
         on_poe_event: Callable[[int], None] | None = None,
-        bind_host: str = "0.0.0.0",  # noqa: S104 - traps arrive on all ifaces
+        bind_host: str = "0.0.0.0",
         bind_port: int = DEFAULT_TRAP_PORT,
         source_host: str | None = None,
     ) -> None:
@@ -79,7 +79,7 @@ class SnmpTrapReceiver:
         """Handle one decoded trap (called in the event loop)."""
         try:
             binds = {str(oid): value for oid, value in var_binds}
-        except Exception:  # noqa: BLE001 - never let a bad trap kill the loop
+        except Exception:
             _LOGGER.debug("Failed to parse trap var_binds", exc_info=True)
             return
 

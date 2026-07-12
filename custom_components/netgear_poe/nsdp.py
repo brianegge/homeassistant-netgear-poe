@@ -138,7 +138,7 @@ async def async_discover(
         try:
             transport, _ = await loop.create_datagram_endpoint(
                 lambda pro=is_pro: _NsdpProtocol(pro, found),
-                local_addr=("0.0.0.0", listen_port),  # noqa: S104
+                local_addr=("0.0.0.0", listen_port),
                 allow_broadcast=True,
                 reuse_port=True,
             )

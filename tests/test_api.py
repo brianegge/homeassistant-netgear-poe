@@ -64,15 +64,31 @@ async def test_get_data_populates_port_names() -> None:
 
     async def fake_request(cgi: str, cmd: str, body: str | None = None) -> dict:
         if cmd == "poe_port":
-            return {"data": {"ports": [
-                {"state": 1, "status": "lang('poe','txtPortStatusDelivering')", "power": 6500},
-                {"state": 0, "status": "lang('poe','txtPortStatusSearching')", "power": 0},
-            ]}}
+            return {
+                "data": {
+                    "ports": [
+                        {
+                            "state": 1,
+                            "status": "lang('poe','txtPortStatusDelivering')",
+                            "power": 6500,
+                        },
+                        {
+                            "state": 0,
+                            "status": "lang('poe','txtPortStatusSearching')",
+                            "power": 0,
+                        },
+                    ]
+                }
+            }
         if cmd == "port_port":
-            return {"data": {"ports": [
-                {"ifindex": 1, "descp": "garage-cam"},
-                {"ifindex": 2, "descp": ""},
-            ]}}
+            return {
+                "data": {
+                    "ports": [
+                        {"ifindex": 1, "descp": "garage-cam"},
+                        {"ifindex": 2, "descp": ""},
+                    ]
+                }
+            }
         raise AssertionError(cmd)
 
     api._authed_request = AsyncMock(side_effect=fake_request)

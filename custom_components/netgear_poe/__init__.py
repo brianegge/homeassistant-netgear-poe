@@ -121,9 +121,7 @@ async def _async_setup_traps(
     coordinator: NetgearPoeCoordinator,
 ) -> SnmpTrapReceiver | None:
     """Start the trap receiver and register HA as a destination. Best-effort."""
-    source_ip = await hass.async_add_executor_job(
-        _get_source_ip, entry.data[CONF_HOST]
-    )
+    source_ip = await hass.async_add_executor_job(_get_source_ip, entry.data[CONF_HOST])
     if not source_ip:
         _LOGGER.warning("Could not determine local IP; SNMP traps disabled")
         return None
@@ -158,7 +156,7 @@ async def _async_run_discovery(hass: HomeAssistant) -> None:
     }
     try:
         switches = await async_discover(duration=DISCOVERY_SCAN_SECONDS)
-    except Exception:  # noqa: BLE001 - never let discovery kill the loop
+    except Exception:
         _LOGGER.debug("NSDP discovery scan failed", exc_info=True)
         return
     _LOGGER.debug(
@@ -245,7 +243,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: NetgearPoeConfigEntry) -
         ) from err
 
     community = entry.data.get(CONF_COMMUNITY)
-    link_monitor = SnmpLinkMonitor(entry.data[CONF_HOST], community) if community else None
+    link_monitor = (
+        SnmpLinkMonitor(entry.data[CONF_HOST], community) if community else None
+    )
     # With SNMP present, take port names from ifAlias instead of the web CGI.
     api.web_port_names_enabled = link_monitor is None
 
@@ -271,9 +271,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: NetgearPoeConfigEntry) -
     return True
 
 
-async def async_unload_entry(
-    hass: HomeAssistant, entry: NetgearPoeConfigEntry
-) -> bool:
+async def async_unload_entry(hass: HomeAssistant, entry: NetgearPoeConfigEntry) -> bool:
     """Unload a config entry."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:

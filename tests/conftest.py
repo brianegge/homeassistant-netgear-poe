@@ -145,9 +145,7 @@ def mock_config_entry() -> MockConfigEntry:
     )
 
 
-async def setup_integration(
-    hass: HomeAssistant, entry: MockConfigEntry
-) -> None:
+async def setup_integration(hass: HomeAssistant, entry: MockConfigEntry) -> None:
     """Set up the integration with a config entry."""
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)

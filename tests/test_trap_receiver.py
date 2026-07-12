@@ -39,7 +39,7 @@ def test_receiver_decodes_link_down() -> None:
     """A linkDown trap fires on_link_change(port, False)."""
     events: list[tuple[int, bool]] = []
     rx = SnmpTrapReceiver(
-        community="egge",
+        community="test-community",
         on_link_change=lambda port, up: events.append((port, up)),
     )
     rx._on_trap(None, None, None, None, _make_binds(OID_LINK_DOWN, 5), None)
@@ -51,7 +51,7 @@ def test_receiver_ignores_non_physical_and_unknown() -> None:
     """LAG ports and non-link traps are ignored."""
     events: list[tuple[int, bool]] = []
     rx = SnmpTrapReceiver(
-        community="egge",
+        community="test-community",
         on_link_change=lambda port, up: events.append((port, up)),
     )
     rx._on_trap(None, None, None, None, _make_binds(OID_LINK_DOWN, 1000), None)

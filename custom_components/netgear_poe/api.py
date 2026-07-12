@@ -268,9 +268,7 @@ class NetgearPoeApi:
             raise NetgearError(f"Port {port} not found")
         fields = _set_fields(data.ports[port].raw, port)
         fields["state"] = 1 if enabled else 0
-        result = await self._authed_request(
-            "set.cgi", "poe_port", form_body(fields)
-        )
+        result = await self._authed_request("set.cgi", "poe_port", form_body(fields))
         if result.get("status") != "ok":
             raise NetgearError(f"PoE set failed: {result}")
 
@@ -287,9 +285,7 @@ class NetgearPoeApi:
         if result.get("status") != "ok":
             raise NetgearError(f"PoE reset failed: {result}")
 
-    async def async_ensure_trap_destination(
-        self, dest_ip: str, community: str
-    ) -> None:
+    async def async_ensure_trap_destination(self, dest_ip: str, community: str) -> None:
         """Register an enabled v2c trap destination on the switch.
 
         Field names/values match the switch's Trap Configuration form:
@@ -338,8 +334,10 @@ class NetgearPoeApi:
 def _is_auth_failure(result: dict[str, Any]) -> bool:
     status = str(result.get("status", "")).lower()
     msg = str(result.get("msgType", "")).lower()
-    return status in ("unauth", "unauthorized") or "login" in msg or (
-        status == "err" and "auth" in str(result).lower()
+    return (
+        status in ("unauth", "unauthorized")
+        or "login" in msg
+        or (status == "err" and "auth" in str(result).lower())
     )
 
 
@@ -385,7 +383,7 @@ def _row_power_watts(row: dict[str, Any]) -> float | None:
 def _set_fields(raw: dict[str, Any], port: int) -> dict[str, Any]:
     """Build the poe_port set fields, echoing current settings."""
     return {
-        "state": _row_enabled(raw) and 1 or 0,
+        "state": (_row_enabled(raw) and 1) or 0,
         "priority": raw.get("priority", 0),
         "powerMode": raw.get("powerMode", 3),
         "powerLimitMode": raw.get("powerLimitMode", 2),

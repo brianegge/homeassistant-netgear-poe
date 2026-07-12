@@ -34,7 +34,7 @@ class SnmpLinkMonitor:
         try:
             oper = await self._walk(OID_IF_OPER_STATUS)
             alias = await self._walk(OID_IF_ALIAS)
-        except Exception as err:  # noqa: BLE001 - degrade on any SNMP failure
+        except Exception as err:
             if self._was_available:
                 _LOGGER.warning("SNMP unavailable on %s: %s", self.host, err)
                 self._was_available = False
