@@ -80,7 +80,12 @@ class NetgearPoeCoordinator(DataUpdateCoordinator[PoeData]):
                 translation_placeholders={"host": self.api.host, "error": str(err)},
             ) from err
         if self.link_monitor is not None:
-            data.link = await self.link_monitor.async_get_link_states()
+            data.link, names = await self.link_monitor.async_get_port_info()
+            # SNMP ifAlias is the same source LibreNMS uses and needs no web
+            # login, so prefer it for port names when available.
+            for port, name in names.items():
+                if port in data.ports:
+                    data.ports[port].alias = name
         return data
 
     @callback
@@ -241,6 +246,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: NetgearPoeConfigEntry) -
 
     community = entry.data.get(CONF_COMMUNITY)
     link_monitor = SnmpLinkMonitor(entry.data[CONF_HOST], community) if community else None
+    # With SNMP present, take port names from ifAlias instead of the web CGI.
+    api.web_port_names_enabled = link_monitor is None
 
     coordinator = NetgearPoeCoordinator(hass, api, link_monitor)
     await coordinator.async_config_entry_first_refresh()

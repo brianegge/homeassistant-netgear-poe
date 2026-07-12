@@ -40,12 +40,30 @@ async def test_link_sensors_unavailable_when_snmp_down(
     mock_config_entry: MockConfigEntry,
 ) -> None:
     """Test link sensors go unavailable when SNMP returns nothing."""
-    mock_link_monitor.async_get_link_states.return_value = {}
+    mock_link_monitor.async_get_port_info.return_value = ({}, {})
     await setup_integration(hass, mock_config_entry)
 
     state = hass.states.get(PORT_1_LINK)
     assert state is not None
     assert state.state == "unavailable"
+
+
+async def test_snmp_names_override_port_alias(
+    hass: HomeAssistant,
+    mock_api: MagicMock,
+    mock_link_monitor: MagicMock,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """Port names from SNMP ifAlias are applied to the entities."""
+    mock_link_monitor.async_get_port_info.return_value = (
+        {1: True, 2: True},
+        {2: "garage-cam"},
+    )
+    await setup_integration(hass, mock_config_entry)
+
+    # Port 2 had no alias in the base data; SNMP supplies its name.
+    state = hass.states.get("switch.boiler_switch_port_2_garage_cam_poe")
+    assert state is not None
 
 
 async def test_no_link_sensors_without_community(

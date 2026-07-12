@@ -75,8 +75,8 @@ def mock_link_monitor() -> Generator[MagicMock]:
         "custom_components.netgear_poe.SnmpLinkMonitor", autospec=True
     ) as monitor_class:
         monitor = monitor_class.return_value
-        monitor.async_get_link_states = AsyncMock(
-            return_value={1: True, 2: False}
+        monitor.async_get_port_info = AsyncMock(
+            return_value=({1: True, 2: False}, {1: "driveway cam"})
         )
         monitor.async_close = AsyncMock()
         yield monitor

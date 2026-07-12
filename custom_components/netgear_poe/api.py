@@ -109,6 +109,9 @@ class NetgearPoeApi:
         self._login_lock = asyncio.Lock()
         self._port_names: dict[int, str] = {}
         self._poll_count = 0
+        # Fetch port names over the web CGI; disabled when SNMP (ifAlias) is
+        # the name source, to avoid an extra web login per refresh.
+        self.web_port_names_enabled = True
 
     def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None:
@@ -218,7 +221,9 @@ class NetgearPoeApi:
         # Port names rarely change; refresh them on the first poll (with
         # retries so entities come up named) and occasionally thereafter to
         # pick up renames without a reload.
-        if not self._port_names or self._poll_count % 20 == 0:
+        if self.web_port_names_enabled and (
+            not self._port_names or self._poll_count % 20 == 0
+        ):
             initial = not self._port_names
             try:
                 names = await self._async_fetch_port_names(retries=3 if initial else 0)
