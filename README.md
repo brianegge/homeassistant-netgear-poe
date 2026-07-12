@@ -34,6 +34,29 @@ directory (or add this repository to HACS as a custom repository), restart
 Home Assistant, then add the **Netgear PoE Switch** integration with the
 switch hostname and admin password.
 
+## Discovery (NSDP)
+
+The integration can auto-discover switches on the local subnet using
+Netgear's own NSDP protocol (the same one the ProSAFE utility uses), so
+they appear under **Settings → Devices & Services** as "Discovered → Add"
+cards with the host pre-filled — you only enter the admin password.
+
+Only **Smart Managed Pro** switches (GS7xx, e.g. GS728TPv2) are offered,
+since those are the models this integration's web API can control. The
+"Plus" line (GS10xPE, JGSxxPE) speaks NSDP too but uses a different web UI
+and is deliberately skipped. NSDP is an L2 broadcast, so it only finds
+switches on Home Assistant's own subnet, and switches answer
+probabilistically — a newly powered switch may take up to a minute to
+appear.
+
+Discovery runs automatically once any switch is configured (to surface the
+rest). To discover the **first** switch without adding one manually, add
+this line to `configuration.yaml` and restart:
+
+```yaml
+netgear_poe:
+```
+
 ## Caveats
 
 - The switch allows a limited number of concurrent web sessions with a

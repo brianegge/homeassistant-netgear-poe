@@ -20,6 +20,13 @@ def auto_enable_custom_integrations(hass: HomeAssistant) -> None:
     hass.data.pop(loader.DATA_CUSTOM_COMPONENTS)
 
 
+@pytest.fixture(autouse=True)
+def no_discovery() -> Generator[None]:
+    """Don't start the NSDP discovery scanner in most tests."""
+    with patch("custom_components.netgear_poe._async_start_discovery"):
+        yield
+
+
 MOCK_HOST = "boiler-switch.home"
 MOCK_PASSWORD = "mock-password"  # NOSONAR
 MOCK_COMMUNITY = "mock-community"

@@ -8,6 +8,7 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.config_entries import ConfigFlowResult
 from homeassistant.const import CONF_HOST, CONF_PASSWORD
+from homeassistant.helpers.device_registry import format_mac
 
 from .api import NetgearAuthError, NetgearError, NetgearPoeApi
 from .const import CONF_COMMUNITY, CONF_ENABLE_TRAPS, DOMAIN
@@ -40,6 +41,8 @@ class NetgearPoeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
 
+    _discovered: dict[str, Any]
+
     async def _async_validate(
         self, user_input: dict[str, Any], errors: dict[str, str]
     ) -> str | None:
@@ -68,6 +71,61 @@ class NetgearPoeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="user", data_schema=USER_SCHEMA, errors=errors
+        )
+
+    async def async_step_integration_discovery(
+        self, discovery_info: dict[str, Any]
+    ) -> ConfigFlowResult:
+        """Handle a switch discovered via NSDP."""
+        host = discovery_info[CONF_HOST]
+        await self.async_set_unique_id(format_mac(discovery_info["mac"]))
+        self._abort_if_unique_id_configured(updates={CONF_HOST: host})
+        # Also skip if the same host was already added manually.
+        if any(
+            entry.data.get(CONF_HOST) == host
+            for entry in self._async_current_entries()
+        ):
+            return self.async_abort(reason="already_configured")
+
+        self._discovered = discovery_info
+        name = discovery_info.get("name") or host
+        model = discovery_info.get("model") or "switch"
+        self.context["title_placeholders"] = {"name": f"{name} ({model})"}
+        return await self.async_step_discovery_confirm()
+
+    async def async_step_discovery_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Collect the password to finish setting up a discovered switch."""
+        errors: dict[str, str] = {}
+        discovered = self._discovered
+
+        if user_input is not None:
+            full_input = {
+                CONF_HOST: discovered[CONF_HOST],
+                CONF_PASSWORD: user_input[CONF_PASSWORD],
+                CONF_COMMUNITY: user_input.get(CONF_COMMUNITY, ""),
+                CONF_ENABLE_TRAPS: user_input.get(CONF_ENABLE_TRAPS, True),
+            }
+            title = await self._async_validate(full_input, errors)
+            if title is not None:
+                return self.async_create_entry(title=title, data=full_input)
+
+        return self.async_show_form(
+            step_id="discovery_confirm",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_PASSWORD): str,
+                    vol.Optional(CONF_COMMUNITY, default=""): str,
+                    vol.Optional(CONF_ENABLE_TRAPS, default=True): bool,
+                }
+            ),
+            description_placeholders={
+                "name": discovered.get("name") or discovered[CONF_HOST],
+                "model": discovered.get("model") or "",
+                "host": discovered[CONF_HOST],
+            },
+            errors=errors,
         )
 
     async def async_step_reauth(

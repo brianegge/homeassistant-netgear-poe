@@ -2,29 +2,37 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import socket
 from dataclasses import dataclass
 from datetime import timedelta
 
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_HOST, CONF_PASSWORD
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.config_entries import SOURCE_INTEGRATION_DISCOVERY, ConfigEntry
+from homeassistant.const import CONF_HOST, CONF_PASSWORD, EVENT_HOMEASSISTANT_STARTED
+from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.helpers import discovery_flow
+from homeassistant.helpers.device_registry import format_mac
+from homeassistant.helpers.typing import ConfigType
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import NetgearAuthError, NetgearError, NetgearPoeApi, PoeData
 from .const import (
     CONF_COMMUNITY,
     CONF_ENABLE_TRAPS,
+    DISCOVERY_INTERVAL_SECONDS,
+    DISCOVERY_SCAN_SECONDS,
     DOMAIN,
     PLATFORMS,
     SCAN_INTERVAL_SECONDS,
 )
+from .nsdp import async_discover
 from .snmp import SnmpLinkMonitor
 from .trap_receiver import SnmpTrapReceiver
 
 _LOGGER = logging.getLogger(__name__)
+_DISCOVERY_STARTED = f"{DOMAIN}_discovery_started"
 
 
 @dataclass
@@ -136,8 +144,72 @@ async def _async_setup_traps(
     return receiver
 
 
+async def _async_run_discovery(hass: HomeAssistant) -> None:
+    """Run one NSDP scan and offer any new Pro switches for setup."""
+    configured = {
+        entry.unique_id
+        for entry in hass.config_entries.async_entries(DOMAIN)
+        if entry.unique_id
+    }
+    try:
+        switches = await async_discover(duration=DISCOVERY_SCAN_SECONDS)
+    except Exception:  # noqa: BLE001 - never let discovery kill the loop
+        _LOGGER.debug("NSDP discovery scan failed", exc_info=True)
+        return
+    for switch in switches:
+        # Only offer switches this integration's web API can actually drive.
+        if not switch.is_pro or format_mac(switch.mac) in configured:
+            continue
+        discovery_flow.async_create_flow(
+            hass,
+            DOMAIN,
+            context={"source": SOURCE_INTEGRATION_DISCOVERY},
+            data={
+                CONF_HOST: switch.host,
+                "mac": switch.mac,
+                "model": switch.model,
+                "name": switch.name,
+            },
+        )
+
+
+@callback
+def _async_start_discovery(hass: HomeAssistant) -> None:
+    """Start the periodic NSDP discovery scan once per HA run."""
+    if hass.data.get(_DISCOVERY_STARTED):
+        return
+    hass.data[_DISCOVERY_STARTED] = True
+
+    async def _scan_loop() -> None:
+        while True:
+            await _async_run_discovery(hass)
+            await asyncio.sleep(DISCOVERY_INTERVAL_SECONDS)
+
+    hass.async_create_background_task(_scan_loop(), f"{DOMAIN}_discovery")
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Enable NSDP discovery when the integration is listed in configuration.yaml."""
+
+    @callback
+    def _start(_event: Event) -> None:
+        _async_start_discovery(hass)
+
+    # Defer the first scan until HA has started so it doesn't slow startup.
+    hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _start)
+    return True
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: NetgearPoeConfigEntry) -> bool:
     """Set up Netgear PoE Switch from a config entry."""
+    # Once any switch is configured, keep scanning to surface the others.
+    if hass.is_running:
+        _async_start_discovery(hass)
+    else:
+        hass.bus.async_listen_once(
+            EVENT_HOMEASSISTANT_STARTED, lambda _e: _async_start_discovery(hass)
+        )
+
     api = NetgearPoeApi(
         host=entry.data[CONF_HOST],
         password=entry.data[CONF_PASSWORD],
