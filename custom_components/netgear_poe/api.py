@@ -181,17 +181,32 @@ class NetgearPoeApi:
                 raise NetgearAuthError(f"Re-login failed for {cmd}: {result}")
         return result
 
-    async def _async_fetch_port_names(self) -> dict[int, str]:
-        """Return {port: assigned description} from the port config page."""
-        result = await self._authed_request("get.cgi", "port_port")
-        rows = result.get("data", {}).get("ports", [])
-        names: dict[int, str] = {}
-        for index, row in enumerate(rows):
-            port = int(row.get("ifindex", index + 1))
-            descp = str(row.get("descp", "")).strip()
-            if descp:
-                names[port] = descp
-        return names
+    async def _async_fetch_port_names(self, retries: int = 0) -> dict[int, str]:
+        """Return {port: assigned description} from the port config page.
+
+        Entity names are set from the first poll, so the initial fetch retries
+        to ride out a transient switch error (login throttle, a stray 502).
+        """
+        last_exc: NetgearError | None = None
+        for attempt in range(retries + 1):
+            try:
+                result = await self._authed_request("get.cgi", "port_port")
+            except NetgearError as err:
+                last_exc = err
+            else:
+                names: dict[int, str] = {}
+                for index, row in enumerate(result.get("data", {}).get("ports", [])):
+                    port = int(row.get("ifindex", index + 1))
+                    descp = str(row.get("descp", "")).strip()
+                    if descp:
+                        names[port] = descp
+                if names:
+                    return names
+            if attempt < retries:
+                await asyncio.sleep(1.5)
+        if last_exc is not None:
+            raise last_exc
+        return {}
 
     async def async_get_data(self) -> PoeData:
         """Fetch PoE state for all ports."""
@@ -200,13 +215,22 @@ class NetgearPoeApi:
         if not rows:
             raise NetgearError(f"No PoE ports in poe_port response: {result}")
 
-        # Port names rarely change; refresh them on the first poll and
-        # occasionally thereafter to pick up renames without a reload.
+        # Port names rarely change; refresh them on the first poll (with
+        # retries so entities come up named) and occasionally thereafter to
+        # pick up renames without a reload.
         if not self._port_names or self._poll_count % 20 == 0:
+            initial = not self._port_names
             try:
-                self._port_names = await self._async_fetch_port_names()
+                names = await self._async_fetch_port_names(retries=3 if initial else 0)
+                if names:
+                    self._port_names = names
             except NetgearError:
-                _LOGGER.debug("Could not fetch port names", exc_info=True)
+                if initial:
+                    _LOGGER.warning(
+                        "Could not fetch port names from %s; ports will be "
+                        "unnamed until the next refresh",
+                        self.host,
+                    )
         self._poll_count += 1
 
         data = PoeData()
