@@ -261,8 +261,16 @@ class NetgearLegacyApi:
         try:
             await asyncio.sleep(_POWER_CYCLE_OFF_SECONDS)
         finally:
-            # Restore power even if the sleep is cancelled mid-cycle.
-            await self.async_set_port_enabled(port, True)
+            # Restore power even if the sleep is cancelled mid-cycle, and
+            # retry so a transient error can't leave the device unpowered.
+            for attempt in range(3):
+                try:
+                    await self.async_set_port_enabled(port, True)
+                    break
+                except NetgearError:
+                    if attempt == 2:
+                        raise
+                    await asyncio.sleep(1)
 
     async def async_ensure_trap_destination(self, dest_ip: str, community: str) -> None:
         """Trap registration is not implemented for the legacy UI."""

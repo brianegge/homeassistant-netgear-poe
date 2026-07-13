@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import xml.etree.ElementTree as ET
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -96,11 +95,11 @@ async def test_get_data() -> None:
 
     assert data.ports[1].admin_enabled is True
     assert data.ports[1].detection_status == "delivering"
-    assert data.ports[1].power_watts == 6.5
+    assert data.ports[1].power_watts == pytest.approx(6.5)
     assert data.ports[1].alias == "garage-cam"
     assert data.ports[2].admin_enabled is False
     assert data.ports[2].detection_status == "disabled"
-    assert data.consumption_watts == 6.5
+    assert data.consumption_watts == pytest.approx(6.5)
 
 
 async def test_get_info() -> None:
@@ -152,6 +151,26 @@ async def test_request_relogins_when_session_rejected() -> None:
     api.async_login.assert_awaited_once()
 
 
+async def test_power_cycle_retries_restore() -> None:
+    """A transient failure restoring power is retried, not left off."""
+    api = NetgearLegacyApi("host", "pw")
+    calls: list[bool] = []
+
+    async def fake_set(port: int, enabled: bool) -> None:
+        calls.append(enabled)
+        if enabled and calls.count(True) == 1:
+            raise NetgearError("transient")
+
+    api.async_set_port_enabled = fake_set
+    with patch(
+        "custom_components.netgear_poe.api_legacy.asyncio.sleep",
+        new=AsyncMock(),
+    ):
+        await api.async_power_cycle_port(1)
+
+    assert calls == [False, True, True]
+
+
 def _mock_session(location: str | None) -> MagicMock:
     resp = MagicMock()
     resp.headers = {"Location": location} if location else {}
@@ -163,7 +182,9 @@ def _mock_session(location: str | None) -> MagicMock:
 
 async def test_detect_api_legacy() -> None:
     """A /csbe<id>/ redirect selects the legacy client with its prefix."""
-    session = _mock_session("http://h/csbe123/config/log_off_page.htm")
+    session = _mock_session(
+        "http://h/csbe123/config/log_off_page.htm"  # NOSONAR — mock redirect
+    )
     with patch(
         "custom_components.netgear_poe.api_legacy.aiohttp.ClientSession",
         return_value=session,

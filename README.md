@@ -24,7 +24,8 @@ For each PoE port the integration creates:
   `detection_status` (`delivering`, `searching`, `disabled`, `fault`, …) and
   `power_watts` attributes so automations can check whether the powered
   device is actually drawing power.
-- **Button** — power cycles the port using the switch's native PoE reset.
+- **Button** — power cycles the port: JSON CGI models use the switch's
+  native PoE reset; legacy xui models toggle PoE off and back on.
 
 With an SNMP community configured, you also get a per-port **link**
 binary sensor (`connectivity`) from IF-MIB `ifOperStatus`, polled every
