@@ -18,6 +18,7 @@ from homeassistant.helpers.typing import ConfigType
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import NetgearAuthError, NetgearError, NetgearPoeApi, PoeData
+from .api_legacy import NetgearLegacyApi, async_detect_api
 from .const import (
     CONF_COMMUNITY,
     CONF_ENABLE_TRAPS,
@@ -39,7 +40,7 @@ _DISCOVERY_STARTED = f"{DOMAIN}_discovery_started"
 class NetgearPoeRuntimeData:
     """Runtime data for the Netgear PoE integration."""
 
-    api: NetgearPoeApi
+    api: NetgearPoeApi | NetgearLegacyApi
     coordinator: NetgearPoeCoordinator
     sys_name: str
     model: str
@@ -56,7 +57,7 @@ class NetgearPoeCoordinator(DataUpdateCoordinator[PoeData]):
     def __init__(
         self,
         hass: HomeAssistant,
-        api: NetgearPoeApi,
+        api: NetgearPoeApi | NetgearLegacyApi,
         link_monitor: SnmpLinkMonitor | None,
     ) -> None:
         super().__init__(
@@ -116,7 +117,7 @@ def _get_source_ip(target_host: str) -> str | None:
 async def _async_setup_traps(
     hass: HomeAssistant,
     entry: NetgearPoeConfigEntry,
-    api: NetgearPoeApi,
+    api: NetgearPoeApi | NetgearLegacyApi,
     community: str,
     coordinator: NetgearPoeCoordinator,
 ) -> SnmpTrapReceiver | None:
@@ -224,10 +225,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: NetgearPoeConfigEntry) -
             EVENT_HOMEASSISTANT_STARTED, lambda _e: _async_start_discovery(hass)
         )
 
-    api = NetgearPoeApi(
-        host=entry.data[CONF_HOST],
-        password=entry.data[CONF_PASSWORD],
-    )
+    try:
+        api = await async_detect_api(
+            host=entry.data[CONF_HOST],
+            password=entry.data[CONF_PASSWORD],
+        )
+    except NetgearError as err:
+        raise ConfigEntryNotReady(
+            translation_domain=DOMAIN,
+            translation_key="connection_failed",
+            translation_placeholders={"host": entry.data[CONF_HOST], "error": str(err)},
+        ) from err
 
     try:
         sys_name, model = await api.async_get_info()

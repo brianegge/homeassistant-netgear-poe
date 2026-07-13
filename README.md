@@ -1,12 +1,20 @@
 # Netgear PoE Switch for Home Assistant
 
-Control PoE power on Netgear Smart Managed Pro switches (e.g. GS728TPv2)
-from Home Assistant, using the switch's web management API. Built to
-power-cycle stubborn PoE devices (cameras, APs) from automations.
+Control PoE power on Netgear Smart Managed Pro switches (e.g. GS728TPv2,
+GS516TP) from Home Assistant, using the switch's web management API. Built
+to power-cycle stubborn PoE devices (cameras, APs) from automations.
 
 Note: these switches expose only read-only MIB-2 over SNMP, so PoE control
-goes through the same JSON CGI API the web UI uses (`/cgi/get.cgi`,
-`/cgi/set.cgi`). Protocol notes: <https://github.com/tai/gs310tp>.
+goes through the same web API the switch's UI uses. Two firmware
+generations are supported and detected automatically:
+
+- **JSON CGI** (GS728TPv2-class, firmware 6.x on Realtek RTL83xx):
+  `/cgi/get.cgi`, `/cgi/set.cgi`. Protocol notes:
+  <https://github.com/tai/gs310tp>.
+- **Legacy XML "xui"** (GS516TP-class, Marvell firmware 6.0.x): the UI
+  served under a per-device `/csbe<id>/` path prefix, with data over the
+  `wcd` XML endpoint. These switches have no native PoE reset, so power
+  cycling toggles PoE off and back on.
 
 ## Entities
 
@@ -16,7 +24,8 @@ For each PoE port the integration creates:
   `detection_status` (`delivering`, `searching`, `disabled`, `fault`, …) and
   `power_watts` attributes so automations can check whether the powered
   device is actually drawing power.
-- **Button** — power cycles the port using the switch's native PoE reset.
+- **Button** — power cycles the port: JSON CGI models use the switch's
+  native PoE reset; legacy xui models toggle PoE off and back on.
 
 With an SNMP community configured, you also get a per-port **link**
 binary sensor (`connectivity`) from IF-MIB `ifOperStatus`, polled every
@@ -41,8 +50,8 @@ Netgear's own NSDP protocol (the same one the ProSAFE utility uses), so
 they appear under **Settings → Devices & Services** as "Discovered → Add"
 cards with the host pre-filled — you only enter the admin password.
 
-Only **Smart Managed Pro** switches (GS7xx, e.g. GS728TPv2) are offered,
-since those are the models this integration's web API can control. The
+Only **Smart Managed Pro** switches (e.g. GS728TPv2, GS516TP) are offered,
+since those are the models this integration's web APIs can control. The
 "Plus" line (GS10xPE, JGSxxPE) speaks NSDP too but uses a different web UI
 and is deliberately skipped. NSDP is an L2 broadcast, so it only finds
 switches on Home Assistant's own subnet, and switches answer

@@ -10,7 +10,8 @@ from homeassistant.config_entries import ConfigFlowResult
 from homeassistant.const import CONF_HOST, CONF_PASSWORD
 from homeassistant.helpers.device_registry import format_mac
 
-from .api import NetgearAuthError, NetgearError, NetgearPoeApi
+from .api import NetgearAuthError, NetgearError
+from .api_legacy import async_detect_api
 from .const import CONF_COMMUNITY, CONF_ENABLE_TRAPS, DOMAIN
 
 USER_SCHEMA = vol.Schema(
@@ -25,7 +26,7 @@ USER_SCHEMA = vol.Schema(
 
 async def _validate_connection(host: str, password: str) -> str:
     """Log in, verify PoE ports exist, and return a title. Raises on failure."""
-    api = NetgearPoeApi(host=host, password=password)
+    api = await async_detect_api(host=host, password=password)
     try:
         sys_name, model = await api.async_get_info()
         data = await api.async_get_data()

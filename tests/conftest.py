@@ -112,25 +112,30 @@ def _store_callback(rx: MagicMock, kwargs: dict) -> MagicMock:
 def mock_api(
     mock_link_monitor: MagicMock, mock_trap_receiver: MagicMock
 ) -> Generator[MagicMock]:
-    """Mock the switch api for both __init__ and config_flow."""
+    """Mock the switch api for both __init__ and config_flow.
+
+    Both call sites go through async_detect_api, which is patched to hand
+    back the same mocked client.
+    """
+    api = MagicMock()
+    api.host = MOCK_HOST
+    api.async_get_info = AsyncMock(return_value=(MOCK_SYS_NAME, MOCK_MODEL))
+    api.async_login = AsyncMock()
+    api.async_get_data = AsyncMock(return_value=make_poe_data())
+    api.async_set_port_enabled = AsyncMock()
+    api.async_power_cycle_port = AsyncMock()
+    api.async_ensure_trap_destination = AsyncMock()
+    api.async_close = AsyncMock()
     with (
         patch(
-            "custom_components.netgear_poe.NetgearPoeApi", autospec=True
-        ) as api_class,
+            "custom_components.netgear_poe.async_detect_api",
+            new=AsyncMock(return_value=api),
+        ),
         patch(
-            "custom_components.netgear_poe.config_flow.NetgearPoeApi",
-            new=api_class,
+            "custom_components.netgear_poe.config_flow.async_detect_api",
+            new=AsyncMock(return_value=api),
         ),
     ):
-        api = api_class.return_value
-        api.host = MOCK_HOST
-        api.async_get_info = AsyncMock(return_value=(MOCK_SYS_NAME, MOCK_MODEL))
-        api.async_login = AsyncMock()
-        api.async_get_data = AsyncMock(return_value=make_poe_data())
-        api.async_set_port_enabled = AsyncMock()
-        api.async_power_cycle_port = AsyncMock()
-        api.async_ensure_trap_destination = AsyncMock()
-        api.async_close = AsyncMock()
         yield api
 
 

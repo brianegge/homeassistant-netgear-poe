@@ -9,5 +9,5 @@
   "issue_tracker": "https://github.com/brianegge/homeassistant-netgear-poe/issues",
   "loggers": ["pysnmp"],
   "requirements": ["pysnmp==7.1.22"],
-  "version": "2.1.0"
+  "version": "2.2.0"
 }

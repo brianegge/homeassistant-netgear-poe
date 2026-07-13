@@ -143,6 +143,9 @@ class NetgearPoeApi:
                 )
             resp.raise_for_status()
             return await resp.json(content_type=None)
+        except ValueError as err:
+            # e.g. an HTML login page from firmware this driver doesn't speak
+            raise NetgearError(f"Non-JSON response to {cmd}: {err}") from err
         except (aiohttp.ClientError, TimeoutError) as err:
             raise NetgearError(f"Request {cmd} failed: {err}") from err
 
