@@ -92,8 +92,10 @@ class NetgearLegacyApi:
 
     def _url(self, path_and_query: str) -> URL:
         # encoded=True keeps the literal {braces} the wcd endpoint requires.
+        # These switches serve plain HTTP only; they have no TLS support.
         return URL(
-            f"http://{self.host}/{self._prefix}/{path_and_query}", encoded=True
+            f"http://{self.host}/{self._prefix}/{path_and_query}",  # NOSONAR
+            encoded=True,
         )
 
     async def _async_refresh_prefix(self) -> None:
@@ -101,7 +103,8 @@ class NetgearLegacyApi:
         session = self._get_session()
         try:
             resp = await session.get(
-                f"http://{self.host}/", allow_redirects=False
+                f"http://{self.host}/",  # NOSONAR — the switch is HTTP-only
+                allow_redirects=False,
             )
         except (aiohttp.ClientError, TimeoutError) as err:
             raise NetgearError(f"Cannot connect to {self.host}: {err}") from err
@@ -136,50 +139,54 @@ class NetgearLegacyApi:
             raise NetgearAuthError("Login gave no sessionID header")
         self._cookie = session_id
 
+    async def _attempt_request(
+        self, path_and_query: str, body: str | None
+    ) -> str | None:
+        """One HTTP attempt; None means the session was rejected."""
+        session = self._get_session()
+        headers = {"Cookie": f"sessionID={self._cookie}"}
+        try:
+            if body is None:
+                resp = await session.get(
+                    self._url(path_and_query),
+                    headers=headers,
+                    allow_redirects=False,
+                )
+            else:
+                headers["Content-Type"] = "text/xml"
+                resp = await session.post(
+                    self._url(path_and_query),
+                    data=body,
+                    headers=headers,
+                    allow_redirects=False,
+                )
+            # An expired session answers 302 to the login page.
+            if resp.status == 302:
+                return None
+            resp.raise_for_status()
+            return await resp.text()
+        except (aiohttp.ClientError, TimeoutError) as err:
+            # A rejected session can also surface as a parse error: the
+            # switch echoes the stale cookie as a malformed header line
+            # ("sessionID=..." with no colon), which aiohttp's strict
+            # parser refuses before we ever see the 302.
+            if "sessionID" in str(err):
+                return None
+            raise NetgearError(f"Request {path_and_query} failed: {err}") from err
+
     async def _request(
         self, path_and_query: str, body: str | None = None
     ) -> ET.Element:
         """Perform a request, logging in (again) as needed."""
-        session = self._get_session()
-        for attempt in (0, 1):
+        for _attempt in (0, 1):
             if self._cookie is None:
                 async with self._login_lock:
                     if self._cookie is None:
                         await self.async_login()
-            headers = {"Cookie": f"sessionID={self._cookie}"}
-            try:
-                if body is None:
-                    resp = await session.get(
-                        self._url(path_and_query),
-                        headers=headers,
-                        allow_redirects=False,
-                    )
-                else:
-                    headers["Content-Type"] = "text/xml"
-                    resp = await session.post(
-                        self._url(path_and_query),
-                        data=body,
-                        headers=headers,
-                        allow_redirects=False,
-                    )
-                # An expired session answers 302 to the login page.
-                if resp.status == 302:
-                    self._cookie = None
-                    continue
-                resp.raise_for_status()
-                text = await resp.text()
-            except (aiohttp.ClientError, TimeoutError) as err:
-                # A rejected session can also surface as a parse error:
-                # the switch echoes the stale cookie as a malformed header
-                # line ("sessionID=..." with no colon), which aiohttp's
-                # strict parser refuses before we ever see the 302.
-                if attempt == 0 and "sessionID" in str(err):
-                    self._cookie = None
-                    continue
-                raise NetgearError(
-                    f"Request {path_and_query} failed: {err}"
-                ) from err
-            return _parse_xml(text)
+            text = await self._attempt_request(path_and_query, body)
+            if text is not None:
+                return _parse_xml(text)
+            self._cookie = None
         raise NetgearAuthError("Session rejected after re-login")
 
     async def async_get_info(self) -> tuple[str, str]:
@@ -286,7 +293,8 @@ async def async_detect_api(
     try:
         try:
             resp = await probe_session.get(
-                f"http://{host}/", allow_redirects=False
+                f"http://{host}/",  # NOSONAR — probing the HTTP-only web UI
+                allow_redirects=False,
             )
         except (aiohttp.ClientError, TimeoutError) as err:
             raise NetgearError(f"Cannot connect to {host}: {err}") from err
