@@ -22,15 +22,28 @@ import asyncio
 import logging
 import re
 import xml.etree.ElementTree as ET
+from xml.sax.saxutils import escape
 
 import aiohttp
 from yarl import URL
 
-from .api import NetgearAuthError, NetgearError, NetgearPoeApi, PoeData, PoePort
+from .api import (
+    NetgearAuthError,
+    NetgearError,
+    NetgearPoeApi,
+    PoeData,
+    PoePort,
+    SwitchInfo,
+)
+from .api_base_ui import NetgearBaseUiApi
 
 _LOGGER = logging.getLogger(__name__)
 
+# Any of the interchangeable per-generation clients async_detect_api returns.
+type NetgearAnyApi = NetgearPoeApi | NetgearLegacyApi | NetgearBaseUiApi
+
 _PREFIX_RE = re.compile(r"/(csbe\d+)/")
+_BASE_UI_RE = re.compile(r"/base/main_login\.html", re.I)
 _LOGIN_OK_CODES = {"0", "9", "10", "12", "13", "14"}
 _DETECTION_STATUS = {
     "1": "disabled",
@@ -110,9 +123,7 @@ class NetgearLegacyApi:
             raise NetgearError(f"Cannot connect to {self.host}: {err}") from err
         match = _PREFIX_RE.search(resp.headers.get("Location", ""))
         if match is None:
-            raise NetgearError(
-                f"{self.host} did not redirect to a legacy UI prefix"
-            )
+            raise NetgearError(f"{self.host} did not redirect to a legacy UI prefix")
         self._prefix = match.group(1)
 
     async def async_login(self) -> None:
@@ -189,12 +200,27 @@ class NetgearLegacyApi:
             self._cookie = None
         raise NetgearAuthError("Session rejected after re-login")
 
-    async def async_get_info(self) -> tuple[str, str]:
-        """Return (sysName, model) from the switch."""
+    async def async_get_info(self) -> SwitchInfo:
+        """Return the switch's name, model and firmware version."""
         root = await self._request("wcd?{DeviceBasicInfo}")
-        name = root.findtext(".//DeviceBasicInfo/deviceName", "").strip()
-        model = root.findtext(".//DeviceBasicInfo/deviceDescription", "").strip()
-        return name, model
+        info = root.find(".//DeviceBasicInfo")
+        if info is None:
+            raise NetgearError("No DeviceBasicInfo in response")
+        # The firmware element name varies across xui firmware builds.
+        firmware = next(
+            (
+                text.strip()
+                for tag in ("firmwareVersion", "softwareVersion", "swVer")
+                if (text := info.findtext(tag)) and text.strip()
+            ),
+            "",
+        )
+        return SwitchInfo(
+            name=info.findtext("deviceName", "").strip(),
+            model=info.findtext("deviceDescription", "").strip(),
+            firmware=firmware,
+            sys_object_id=info.findtext("systemObjectID", "").strip().lstrip("."),
+        )
 
     async def async_get_data(self) -> PoeData:
         """Fetch PoE state for all ports."""
@@ -237,16 +263,15 @@ class NetgearLegacyApi:
             raise NetgearError(f"Port {port} not found")
         return self._if_names[port]
 
-    async def async_set_port_enabled(self, port: int, enabled: bool) -> None:
-        """Enable or disable PoE on a port."""
+    async def _async_set_interface(self, port: int, elements: str) -> None:
+        """Post a PoEPSEInterfaceList set for one port and check the status."""
         if_name = await self._async_if_name(port)
         body = (
             "<?xml version='1.0' encoding='utf-8'?>"
             '<DeviceConfiguration set="set">'
             '<PoEPSEInterfaceList action="set" set="set">'
             f"<Interface><interfaceName>{if_name}</interfaceName>"
-            # SNMP TruthValue semantics (pethPsePortAdminEnable): 2 = disable
-            f"<adminEnable>{1 if enabled else 2}</adminEnable></Interface>"
+            f"{elements}</Interface>"
             "</PoEPSEInterfaceList></DeviceConfiguration>"
         )
         root = await self._request("wcd", body=body)
@@ -254,6 +279,19 @@ class NetgearLegacyApi:
         if code not in ("", "0"):
             status = root.findtext(".//ActionStatus/statusString", "").strip()
             raise NetgearError(f"PoE set failed: {status or code}")
+
+    async def async_set_port_enabled(self, port: int, enabled: bool) -> None:
+        """Enable or disable PoE on a port."""
+        # SNMP TruthValue semantics (pethPsePortAdminEnable): 2 = disable
+        await self._async_set_interface(
+            port, f"<adminEnable>{1 if enabled else 2}</adminEnable>"
+        )
+
+    async def async_set_port_name(self, port: int, name: str) -> None:
+        """Set the port's powered-device description (its name in HA)."""
+        await self._async_set_interface(
+            port, f"<poweredDevice>{escape(name)}</poweredDevice>"
+        )
 
     async def async_power_cycle_port(self, port: int) -> None:
         """Power cycle a port; the legacy UI has no native PoE reset."""
@@ -290,11 +328,15 @@ async def async_detect_api(
     host: str,
     password: str,
     session: aiohttp.ClientSession | None = None,
-) -> NetgearPoeApi | NetgearLegacyApi:
+) -> NetgearAnyApi:
     """Return the right client for the switch's firmware generation.
 
-    Legacy xui firmware 302-redirects every request to its /csbe<id>/
-    prefix; the newer JSON-CGI firmware serves the login page directly.
+    The three generations answer the root URL differently:
+
+    * Legacy xui (GS516TP) 302-redirects to its per-device /csbe<id>/ prefix.
+    * The classic /base/ UI (GS110TP) serves a login form posting to
+      /base/main_login.html.
+    * The newer JSON-CGI firmware serves its own login page directly.
     """
     timeout = aiohttp.ClientTimeout(total=10)
     probe_session = session or aiohttp.ClientSession(timeout=timeout)
@@ -304,9 +346,11 @@ async def async_detect_api(
                 f"http://{host}/",  # NOSONAR — probing the HTTP-only web UI
                 allow_redirects=False,
             )
+            match = _PREFIX_RE.search(resp.headers.get("Location", ""))
+            # Only the non-redirecting generations need their body inspected.
+            body = "" if match else await resp.text(errors="replace")
         except (aiohttp.ClientError, TimeoutError) as err:
             raise NetgearError(f"Cannot connect to {host}: {err}") from err
-        match = _PREFIX_RE.search(resp.headers.get("Location", ""))
     finally:
         if session is None:
             await probe_session.close()
@@ -315,4 +359,6 @@ async def async_detect_api(
         return NetgearLegacyApi(
             host=host, password=password, session=session, prefix=match.group(1)
         )
+    if _BASE_UI_RE.search(body):
+        return NetgearBaseUiApi(host=host, password=password, session=session)
     return NetgearPoeApi(host=host, password=password, session=session)

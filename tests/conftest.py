@@ -10,7 +10,7 @@ from homeassistant import loader
 from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.netgear_poe.api import PoeData, PoePort
+from custom_components.netgear_poe.api import PoeData, PoePort, SwitchInfo
 from custom_components.netgear_poe.const import DOMAIN
 
 
@@ -38,6 +38,7 @@ MOCK_CONFIG = {
 }
 MOCK_SYS_NAME = "boiler-switch"
 MOCK_MODEL = "GS728TPv2"
+MOCK_FIRMWARE = "6.0.8.15"
 
 
 def make_poe_data(
@@ -119,10 +120,15 @@ def mock_api(
     """
     api = MagicMock()
     api.host = MOCK_HOST
-    api.async_get_info = AsyncMock(return_value=(MOCK_SYS_NAME, MOCK_MODEL))
+    api.async_get_info = AsyncMock(
+        return_value=SwitchInfo(
+            name=MOCK_SYS_NAME, model=MOCK_MODEL, firmware=MOCK_FIRMWARE
+        )
+    )
     api.async_login = AsyncMock()
     api.async_get_data = AsyncMock(return_value=make_poe_data())
     api.async_set_port_enabled = AsyncMock()
+    api.async_set_port_name = AsyncMock()
     api.async_power_cycle_port = AsyncMock()
     api.async_ensure_trap_destination = AsyncMock()
     api.async_close = AsyncMock()

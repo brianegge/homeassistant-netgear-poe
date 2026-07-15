@@ -1,12 +1,15 @@
 # Netgear PoE Switch for Home Assistant
 
 Control PoE power on Netgear Smart Managed Pro switches (e.g. GS728TPv2,
-GS516TP) from Home Assistant, using the switch's web management API. Built
-to power-cycle stubborn PoE devices (cameras, APs) from automations.
+GS516TP, GS110TP) from Home Assistant, using the switch's web management
+API. Built to power-cycle stubborn PoE devices (cameras, APs) from
+automations.
 
 Note: these switches expose only read-only MIB-2 over SNMP, so PoE control
-goes through the same web API the switch's UI uses. Two firmware
-generations are supported and detected automatically:
+goes through the same web API the switch's UI uses. Three firmware
+generations are supported and detected automatically — the integration
+probes the switch rather than trusting the model name, since revisions of
+one model (a GS110TP vs a GS110TPv3) can speak different APIs:
 
 - **JSON CGI** (GS728TPv2-class, firmware 6.x on Realtek RTL83xx):
   `/cgi/get.cgi`, `/cgi/set.cgi`. Protocol notes:
@@ -15,6 +18,10 @@ generations are supported and detected automatically:
   served under a per-device `/csbe<id>/` path prefix, with data over the
   `wcd` XML endpoint. These switches have no native PoE reset, so power
   cycling toggles PoE off and back on.
+- **Classic HTML** (GS110TP-class, Broadcom firmware 5.4.x): the frames-based
+  UI under `/base/`, driven by posting the same forms a browser would. These
+  switches have no native PoE reset either, and don't support registering an
+  SNMP trap destination (link state falls back to polling).
 
 ## Entities
 
@@ -25,7 +32,8 @@ For each PoE port the integration creates:
   `power_watts` attributes so automations can check whether the powered
   device is actually drawing power.
 - **Button** — power cycles the port: JSON CGI models use the switch's
-  native PoE reset; legacy xui models toggle PoE off and back on.
+  native PoE reset; legacy xui and classic HTML models toggle PoE off and
+  back on.
 
 With an SNMP community configured, you also get a per-port **link**
 binary sensor (`connectivity`) from IF-MIB `ifOperStatus`, polled every
@@ -35,6 +43,23 @@ the switch, so `linkUp`/`linkDown` events update the link sensors
 instantly (the poll remains a backstop for dropped UDP traps).
 
 Plus one **PoE power** sensor with the switch's total PoE draw in watts.
+
+## Actions
+
+`netgear_poe.set_port_name` sets a port's description on the switch,
+targeting the port's PoE switch entity. On JSON CGI and classic HTML models
+this is the port description (also visible as SNMP `ifAlias`); on legacy xui
+models it is the PoE "powered device" field. Entity names include the port
+description and are fixed at setup, so they pick up the new name after
+the integration is reloaded.
+
+```yaml
+action: netgear_poe.set_port_name
+target:
+  entity_id: switch.boiler_switch_port_3_poe
+data:
+  name: driveway-cam
+```
 
 ## Installation
 
@@ -50,8 +75,8 @@ Netgear's own NSDP protocol (the same one the ProSAFE utility uses), so
 they appear under **Settings → Devices & Services** as "Discovered → Add"
 cards with the host pre-filled — you only enter the admin password.
 
-Only **Smart Managed Pro** switches (e.g. GS728TPv2, GS516TP) are offered,
-since those are the models this integration's web APIs can control. The
+Only **Smart Managed Pro** switches (e.g. GS728TPv2, GS516TP, GS110TP) are
+offered, since those are the models this integration's web APIs can control. The
 "Plus" line (GS10xPE, JGSxxPE) speaks NSDP too but uses a different web UI
 and is deliberately skipped. NSDP is an L2 broadcast, so it only finds
 switches on Home Assistant's own subnet, and switches answer

@@ -16,6 +16,7 @@ from base64 import b64decode, b64encode
 from dataclasses import dataclass, field
 from hashlib import md5
 from typing import Any
+from urllib.parse import quote
 
 import aiohttp
 
@@ -68,6 +69,17 @@ def form_body(fields: dict[str, Any]) -> str:
     """Build the odd JSON body the API expects: {"_ds=1&k=v&_de=1":{}}."""
     parts = "&".join(f"{k}={v}" for k, v in fields.items())
     return '{"_ds=1&' + parts + '&_de=1":{}}'
+
+
+@dataclass
+class SwitchInfo:
+    """Identity of the switch."""
+
+    name: str
+    model: str
+    firmware: str = ""
+    # SNMP sysObjectID (e.g. "1.3.6.1.4.1.4526.100.4.29"); a model-exact key.
+    sys_object_id: str = ""
 
 
 @dataclass
@@ -288,6 +300,39 @@ class NetgearPoeApi:
         if result.get("status") != "ok":
             raise NetgearError(f"PoE reset failed: {result}")
 
+    async def async_set_port_name(self, port: int, name: str) -> None:
+        """Set a port's description (the switch UI name / SNMP ifAlias).
+
+        The edit form echoes the port's link settings alongside the new
+        description, so the current port_port row is fetched first.
+        """
+        result = await self._authed_request("get.cgi", "port_port")
+        row: dict[str, Any] | None = None
+        for index, candidate in enumerate(result.get("data", {}).get("ports", [])):
+            if int(candidate.get("ifindex", index + 1)) == port:
+                row = candidate
+                break
+        if row is None:
+            raise NetgearError(f"Port {port} not found")
+        fields = {
+            "portList": quote(str(row.get("portName", port)), safe=""),
+            "descp": quote(name, safe=""),
+            "adminStatus": _port_edit_value(row.get("adminStatus"), "on"),
+            "adminSpeed": _port_edit_value(row.get("adminSpeed"), "auto"),
+            "adminDuplex": _port_edit_value(row.get("adminDuplex"), "auto"),
+            "adminFlowCtrl": _port_edit_value(row.get("adminFlowCtrl"), "disable"),
+            "xsrf": "undefined",
+        }
+        result = await self._authed_request(
+            "set.cgi", "port_portEdit", form_body(fields)
+        )
+        if result.get("status") != "ok":
+            raise NetgearError(f"Port name set failed: {result}")
+        if name:
+            self._port_names[port] = name
+        else:
+            self._port_names.pop(port, None)
+
     async def async_ensure_trap_destination(self, dest_ip: str, community: str) -> None:
         """Register an enabled v2c trap destination on the switch.
 
@@ -309,12 +354,17 @@ class NetgearPoeApi:
             ),
         )
 
-    async def async_get_info(self) -> tuple[str, str]:
-        """Return (sysName, model) from the switch."""
+    async def async_get_info(self) -> SwitchInfo:
+        """Return the switch's name, model and firmware version."""
         result = await self._authed_request("get.cgi", "sys_info")
         data = result.get("data", {})
         model = _parse_lang_key(str(data.get("sysProduct", "")), "txtModelDescp")
-        return str(data.get("sysName", "")), model
+        return SwitchInfo(
+            name=str(data.get("sysName", "")),
+            model=model,
+            firmware=str(data.get("fwVer", "")),
+            sys_object_id=str(data.get("sysObjectID", "")).lstrip("."),
+        )
 
     async def async_logout(self) -> None:
         """Log out to free the switch's limited session slots."""
@@ -371,6 +421,21 @@ def _parse_lang_key(value: str, prefix: str) -> str:
     if key.startswith(prefix):
         key = key[len(prefix) :]
     return key
+
+
+def _port_edit_value(value: Any, default: str) -> str:
+    """Map a port_port row value to the label the port edit form posts.
+
+    Rows carry lang() artifacts like lang('common','lblAuto') or numeric
+    flags; the set form wants lowercase labels ("on", "auto", "disable").
+    """
+    if value in (None, ""):
+        return default
+    text = str(value)
+    if text.isdigit():
+        return default if int(text) else "disable"
+    label = _parse_lang_key(text, "lbl").lower()
+    return {"enabled": "on", "enable": "on", "disabled": "disable"}.get(label, label)
 
 
 def _row_power_watts(row: dict[str, Any]) -> float | None:

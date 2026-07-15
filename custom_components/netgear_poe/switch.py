@@ -5,14 +5,18 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+import voluptuous as vol
 from homeassistant.components.switch import SwitchDeviceClass, SwitchEntity
+from homeassistant.const import ATTR_NAME
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import entity_platform
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import NetgearPoeConfigEntry, NetgearPoeCoordinator
 from .api import NetgearError
-from .const import DOMAIN
+from .const import DOMAIN, SERVICE_SET_PORT_NAME
 from .entity import NetgearPoePortEntity
 
 _LOGGER = logging.getLogger(__name__)
@@ -30,6 +34,13 @@ async def async_setup_entry(
     async_add_entities(
         NetgearPoePortSwitch(coordinator, entry, port)
         for port in sorted(coordinator.data.ports)
+    )
+
+    platform = entity_platform.async_get_current_platform()
+    platform.async_register_entity_service(
+        SERVICE_SET_PORT_NAME,
+        {vol.Required(ATTR_NAME): cv.string},
+        "async_set_port_name",
     )
 
 
@@ -75,6 +86,29 @@ class NetgearPoePortSwitch(NetgearPoePortEntity, SwitchEntity):
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Disable PoE power on this port."""
         await self._async_set_enabled(False)
+
+    async def async_set_port_name(self, name: str) -> None:
+        """Set the port's description on the switch (set_port_name action).
+
+        Entity names include the description and are fixed at setup, so
+        they reflect the new name after the integration is reloaded.
+        """
+        try:
+            await self.coordinator.api.async_set_port_name(self._port, name)
+        except NetgearError as err:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="set_port_name_failed",
+                translation_placeholders={
+                    "port": str(self._port),
+                    "host": self.coordinator.api.host,
+                    "error": str(err),
+                },
+            ) from err
+        port_data = self.port_data
+        if port_data is not None:
+            port_data.alias = name
+        await self.coordinator.async_request_refresh()
 
     async def _async_set_enabled(self, enabled: bool) -> None:
         try:

@@ -17,8 +17,8 @@ from homeassistant.helpers.device_registry import format_mac
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .api import NetgearAuthError, NetgearError, NetgearPoeApi, PoeData
-from .api_legacy import NetgearLegacyApi, async_detect_api
+from .api import NetgearAuthError, NetgearError, PoeData
+from .api_legacy import NetgearAnyApi, async_detect_api
 from .const import (
     CONF_COMMUNITY,
     CONF_ENABLE_TRAPS,
@@ -40,10 +40,12 @@ _DISCOVERY_STARTED = f"{DOMAIN}_discovery_started"
 class NetgearPoeRuntimeData:
     """Runtime data for the Netgear PoE integration."""
 
-    api: NetgearPoeApi | NetgearLegacyApi
+    api: NetgearAnyApi
     coordinator: NetgearPoeCoordinator
     sys_name: str
     model: str
+    firmware: str
+    sys_object_id: str
     link_monitor: SnmpLinkMonitor | None
     trap_receiver: SnmpTrapReceiver | None
 
@@ -57,7 +59,7 @@ class NetgearPoeCoordinator(DataUpdateCoordinator[PoeData]):
     def __init__(
         self,
         hass: HomeAssistant,
-        api: NetgearPoeApi | NetgearLegacyApi,
+        api: NetgearAnyApi,
         link_monitor: SnmpLinkMonitor | None,
     ) -> None:
         super().__init__(
@@ -117,7 +119,7 @@ def _get_source_ip(target_host: str) -> str | None:
 async def _async_setup_traps(
     hass: HomeAssistant,
     entry: NetgearPoeConfigEntry,
-    api: NetgearPoeApi | NetgearLegacyApi,
+    api: NetgearAnyApi,
     community: str,
     coordinator: NetgearPoeCoordinator,
 ) -> SnmpTrapReceiver | None:
@@ -238,7 +240,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: NetgearPoeConfigEntry) -
         ) from err
 
     try:
-        sys_name, model = await api.async_get_info()
+        info = await api.async_get_info()
     except NetgearAuthError as err:
         await api.async_close()
         raise ConfigEntryAuthFailed(str(err)) from err
@@ -269,8 +271,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: NetgearPoeConfigEntry) -
     entry.runtime_data = NetgearPoeRuntimeData(
         api=api,
         coordinator=coordinator,
-        sys_name=sys_name,
-        model=model,
+        sys_name=info.name,
+        model=info.model,
+        firmware=info.firmware,
+        sys_object_id=info.sys_object_id,
         link_monitor=link_monitor,
         trap_receiver=trap_receiver,
     )

@@ -5,7 +5,10 @@ from __future__ import annotations
 from base64 import b64decode
 from unittest.mock import AsyncMock
 
+import pytest
+
 from custom_components.netgear_poe.api import (
+    NetgearError,
     NetgearPoeApi,
     encode_password,
     form_body,
@@ -97,3 +100,129 @@ async def test_get_data_populates_port_names() -> None:
     assert data.ports[1].alias == "garage-cam"
     assert data.ports[2].alias == ""
     assert data.consumption_watts == 6.5
+
+
+async def test_get_info_parses_firmware() -> None:
+    """sys_info maps sysName, the model lang key and fwVer."""
+    api = NetgearPoeApi("host", "pw")
+    api._authed_request = AsyncMock(
+        return_value={
+            "data": {
+                "sysName": "boiler-switch",
+                "sysProduct": "lang('sys','txtModelDescpGS728TPv2')",
+                "fwVer": "6.0.8.15",
+            }
+        }
+    )
+
+    info = await api.async_get_info()
+    assert info.name == "boiler-switch"
+    assert info.model == "GS728TPv2"
+    assert info.firmware == "6.0.8.15"
+
+
+async def test_get_info_without_firmware() -> None:
+    """A sys_info response without fwVer yields an empty firmware string."""
+    api = NetgearPoeApi("host", "pw")
+    api._authed_request = AsyncMock(
+        return_value={"data": {"sysName": "sw", "sysProduct": "GS728TPv2"}}
+    )
+
+    info = await api.async_get_info()
+    assert info.firmware == ""
+
+
+PORT_PORT_RESPONSE = {
+    "data": {
+        "ports": [
+            {
+                "ifindex": 1,
+                "portName": "GE1",
+                "descp": "old-name",
+                "adminStatus": 1,
+                "adminSpeed": "lang('common','lblAuto')",
+                "adminDuplex": "lang('common','lblAuto')",
+                "adminFlowCtrl": "lang('common','lblDisabled')",
+            },
+            {"ifindex": 2, "descp": ""},
+        ]
+    }
+}
+
+
+async def test_set_port_name_posts_edit_form() -> None:
+    """The edit form carries the encoded name and echoes link settings."""
+    api = NetgearPoeApi("host", "pw")
+    calls: list[tuple[str, str, str | None]] = []
+
+    async def fake_request(cgi: str, cmd: str, body: str | None = None) -> dict:
+        calls.append((cgi, cmd, body))
+        if cmd == "port_port":
+            return PORT_PORT_RESPONSE
+        return {"status": "ok"}
+
+    api._authed_request = AsyncMock(side_effect=fake_request)
+    await api.async_set_port_name(1, "garage cam")
+
+    cgi, cmd, body = calls[-1]
+    assert (cgi, cmd) == ("set.cgi", "port_portEdit")
+    assert body is not None
+    assert "portList=GE1" in body
+    assert "descp=garage%20cam" in body
+    assert "adminStatus=on" in body
+    assert "adminSpeed=auto" in body
+    assert "adminDuplex=auto" in body
+    assert "adminFlowCtrl=disable" in body
+    # The cached alias updates immediately for the next poll.
+    assert api._port_names[1] == "garage cam"
+
+
+async def test_set_port_name_defaults_without_row_settings() -> None:
+    """A sparse row (no name/link fields) falls back to safe defaults."""
+    api = NetgearPoeApi("host", "pw")
+    calls: list[tuple[str, str, str | None]] = []
+
+    async def fake_request(cgi: str, cmd: str, body: str | None = None) -> dict:
+        calls.append((cgi, cmd, body))
+        if cmd == "port_port":
+            return PORT_PORT_RESPONSE
+        return {"status": "ok"}
+
+    api._authed_request = AsyncMock(side_effect=fake_request)
+    api._port_names = {2: "stale"}
+    await api.async_set_port_name(2, "")
+
+    _cgi, _cmd, body = calls[-1]
+    assert body is not None
+    assert "portList=2" in body
+    assert "descp=&" in body
+    assert "adminStatus=on" in body
+    assert "adminFlowCtrl=disable" in body
+    # Clearing the description drops the cached alias.
+    assert 2 not in api._port_names
+
+
+async def test_set_port_name_unknown_port() -> None:
+    """Renaming a port that does not exist raises NetgearError."""
+    api = NetgearPoeApi("host", "pw")
+    api._authed_request = AsyncMock(return_value=PORT_PORT_RESPONSE)
+
+    with pytest.raises(NetgearError, match="Port 9 not found"):
+        await api.async_set_port_name(9, "x")
+
+
+async def test_set_port_name_rejected() -> None:
+    """A non-ok set status raises NetgearError and keeps the old cache."""
+    api = NetgearPoeApi("host", "pw")
+
+    async def fake_request(cgi: str, cmd: str, body: str | None = None) -> dict:
+        if cmd == "port_port":
+            return PORT_PORT_RESPONSE
+        return {"status": "err", "msgType": "errInvalidParam"}
+
+    api._authed_request = AsyncMock(side_effect=fake_request)
+    api._port_names = {1: "old-name"}
+
+    with pytest.raises(NetgearError, match="Port name set failed"):
+        await api.async_set_port_name(1, "new")
+    assert api._port_names[1] == "old-name"

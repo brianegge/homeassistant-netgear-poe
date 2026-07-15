@@ -28,11 +28,11 @@ async def _validate_connection(host: str, password: str) -> str:
     """Log in, verify PoE ports exist, and return a title. Raises on failure."""
     api = await async_detect_api(host=host, password=password)
     try:
-        sys_name, model = await api.async_get_info()
+        info = await api.async_get_info()
         data = await api.async_get_data()
         if not data.ports:
             raise NetgearError("No PoE ports found")
-        return sys_name or model or host
+        return info.name or info.model or host
     finally:
         await api.async_close()
 

@@ -1,0 +1,11 @@
+set_port_name:
+  target:
+    entity:
+      integration: netgear_poe
+      domain: switch
+  fields:
+    name:
+      required: true
+      example: garage-cam
+      selector:
+        text:
