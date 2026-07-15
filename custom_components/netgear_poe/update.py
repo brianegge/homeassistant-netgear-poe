@@ -65,17 +65,29 @@ _IMAGE_SUFFIXES = (".stk", ".ros")
 
 
 def _extract_image(blob: bytes, url: str) -> tuple[str, bytes]:
-    """Return (filename, image) from a download; Netgear zips the image."""
-    if not blob.startswith(b"PK"):
-        return url.rsplit("/", 1)[-1], blob
-    with zipfile.ZipFile(io.BytesIO(blob)) as archive:
-        for name in archive.namelist():
-            if name.lower().endswith(_IMAGE_SUFFIXES):
-                return name.rsplit("/", 1)[-1], archive.read(name)
+    """Return (filename, image) from a download; Netgear zips the image.
+
+    Only a URL that names the image itself may pass its body through
+    unwrapped. Anything else must be a real zip: a proxy or CDN error page
+    served with HTTP 200 for a .zip URL would otherwise be handed to the
+    switch and overwrite the rollback slot with junk.
+    """
+    name = url.rsplit("/", 1)[-1]
+    if blob.startswith(b"PK"):
+        with zipfile.ZipFile(io.BytesIO(blob)) as archive:
+            for member in archive.namelist():
+                if member.lower().endswith(_IMAGE_SUFFIXES):
+                    return member.rsplit("/", 1)[-1], archive.read(member)
+        raise HomeAssistantError(
+            "No firmware image ("
+            + "/".join(_IMAGE_SUFFIXES)
+            + ") in the downloaded archive"
+        )
+    if name.lower().endswith(_IMAGE_SUFFIXES):
+        return name, blob
     raise HomeAssistantError(
-        "No firmware image ("
-        + "/".join(_IMAGE_SUFFIXES)
-        + ") in the downloaded archive"
+        f"{url} did not return a firmware image (got {len(blob)} bytes that "
+        "are neither a zip nor a named image)"
     )
 
 

@@ -237,6 +237,9 @@ class NetgearBaseUiApi:
         self._logged_in = False
         self._login_lock = asyncio.Lock()
         self._port_names: dict[int, str] = {}
+        # Distinct from `_port_names` being non-empty: a switch with no
+        # descriptions is loaded and empty, not unloaded.
+        self._port_names_loaded = False
         self._poll_count = 0
         # Fetch port names from port_cfg.html; disabled when SNMP (ifAlias) is
         # the name source, to avoid an extra page fetch per refresh.
@@ -373,12 +376,17 @@ class NetgearBaseUiApi:
         Names rarely change: they are fetched on the first poll (with retries,
         so entities come up named) and occasionally thereafter to pick up a
         rename without a reload.
+
+        Whether names have been loaded is tracked separately from whether any
+        exist: on a switch where nothing is named, {} is the real answer, and
+        keying the throttle off the dict itself would re-run the initial fetch
+        (with its retries) on every single poll.
         """
         if not self.web_port_names_enabled:
             return
-        if self._port_names and self._poll_count % 20:
+        if self._port_names_loaded and self._poll_count % 20:
             return
-        initial = not self._port_names
+        initial = not self._port_names_loaded
         try:
             names = await self._async_fetch_port_names(retries=3 if initial else 0)
         except NetgearError:
@@ -392,6 +400,7 @@ class NetgearBaseUiApi:
                 )
             return
         self._port_names = names
+        self._port_names_loaded = True
 
     def _to_poe_port(self, row: dict[str, str]) -> PoePort | None:
         """Map one row of the PoE table to a port, or None if it isn't one."""
@@ -603,10 +612,21 @@ class NetgearBaseUiApi:
                 headers={"Referer": url},
                 timeout=aiohttp.ClientTimeout(total=20),
             ) as resp:
-                await resp.read()
+                resp.raise_for_status()
+                text = await resp.text(encoding=_ENCODING)
         except (aiohttp.ClientError, TimeoutError):
-            pass
+            # Losing the connection IS the reboot; anything else is answered
+            # below by a switch that is still very much awake.
+            self._logged_in = False
+            return
+        # A complete reply means the reboot was refused. Say so here rather
+        # than leaving the caller to sit out the whole reboot timeout.
         self._logged_in = False
+        if _LOGIN_FORM_RE.search(text):
+            raise NetgearAuthError("Session expired before the reboot request")
+        if _input_value(text, "err_flag") == "1":
+            reason = _input_value(text, "err_msg") or _UNKNOWN_ERROR
+            raise NetgearError(f"Switch refused to reboot: {reason}")
 
     async def _async_wait_for_firmware(
         self, version: str, progress: Callable[[int], None] | None = None

@@ -252,6 +252,35 @@ async def test_fetch_port_names_retries_when_table_missing() -> None:
     assert api._request.await_count == 2
 
 
+async def test_refresh_port_names_throttles_when_nothing_is_named() -> None:
+    """A switch with no descriptions is "loaded", so polls stay throttled.
+
+    {} is a real answer, so keying the throttle off the dict itself would
+    re-run the initial fetch — retries and all — on every single poll.
+    """
+    unnamed = PORT_CFG_HTML.replace("<TD>garage cam</TD>", "<TD></TD>")
+    api = _api(
+        {
+            "poe_port_cfg": POE_PORT_HTML,
+            "poe_cfg": POE_CFG_HTML,
+            "port/port_cfg": unnamed,
+        }
+    )
+
+    for _ in range(3):
+        await api.async_get_data()
+
+    fetches = [
+        call.args[0]
+        for call in api._request.await_args_list
+        if "port/port_cfg" in call.args[0]
+    ]
+    assert api._port_names == {}
+    assert api._port_names_loaded is True
+    # Fetched once for the first poll, then throttled — not once per poll.
+    assert len(fetches) == 1
+
+
 async def test_refresh_port_names_clears_stale_names() -> None:
     """Descriptions cleared on the switch drop out of the cache."""
     unnamed = PORT_CFG_HTML.replace("<TD>garage cam</TD>", "<TD></TD>")
@@ -263,6 +292,7 @@ async def test_refresh_port_names_clears_stale_names() -> None:
         }
     )
     api._port_names = {2: "garage cam"}
+    api._port_names_loaded = True
     api._poll_count = 20  # due for a refresh
 
     data = await api.async_get_data()
@@ -291,6 +321,7 @@ async def test_get_data_keeps_names_when_refresh_fails() -> None:
     """A later name refresh that fails leaves the cached names in place."""
     api = _api({"poe_port_cfg": POE_PORT_HTML, "poe_cfg": POE_CFG_HTML})
     api._port_names = {1: "cached cam"}
+    api._port_names_loaded = True
     api._poll_count = 20  # due for a refresh; port_cfg is not served -> fails
 
     data = await api.async_get_data()
@@ -705,6 +736,38 @@ async def test_reboot_swallows_the_connection_drop() -> None:
     api = NetgearBaseUiApi("host", "pw", session=session)
 
     await api._async_reboot()  # must not raise
+
+
+async def test_reboot_raises_when_the_switch_refuses() -> None:
+    """A complete answer means it did not reboot, so say why now.
+
+    Otherwise the caller sits out the whole reboot timeout before failing
+    with a misleading "did not come back on firmware X".
+    """
+    session = _login_session(True)
+    session.post.return_value.__aenter__.return_value.text = AsyncMock(
+        return_value=(
+            '<html><body><INPUT TYPE="hidden" NAME="err_flag" VALUE="1">'
+            '<INPUT TYPE="hidden" NAME="err_msg" VALUE="Reboot not permitted">'
+            "</body></html>"
+        )
+    )
+    api = NetgearBaseUiApi("host", "pw", session=session)
+
+    with pytest.raises(NetgearError, match="Reboot not permitted"):
+        await api._async_reboot()
+
+
+async def test_reboot_raises_when_session_expired() -> None:
+    """A re-served login page means the reboot never happened."""
+    session = _login_session(True)
+    session.post.return_value.__aenter__.return_value.text = AsyncMock(
+        return_value=LOGIN_PAGE_HTML
+    )
+    api = NetgearBaseUiApi("host", "pw", session=session)
+
+    with pytest.raises(NetgearAuthError, match="Session expired"):
+        await api._async_reboot()
 
 
 async def test_wait_for_firmware_rides_out_reboot() -> None:

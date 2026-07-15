@@ -101,10 +101,19 @@ def test_extract_image_from_zip() -> None:
 
 
 def test_extract_image_passes_through_raw_stk() -> None:
-    """A download that is not a zip is assumed to be the image itself."""
+    """A URL naming the image itself may serve the image unwrapped."""
     filename, image = _extract_image(b"raw-stk-bytes", "https://x/fw_V1.stk")
     assert filename == "fw_V1.stk"
     assert image == b"raw-stk-bytes"
+
+
+def test_extract_image_rejects_non_zip_from_a_zip_url() -> None:
+    """An error page served 200 for a .zip URL must never reach the switch.
+
+    It would otherwise be flashed over the rollback slot as "firmware".
+    """
+    with pytest.raises(HomeAssistantError, match="did not return a firmware image"):
+        _extract_image(b"<html><body>502 Bad Gateway</body></html>", "https://x/fw.zip")
 
 
 def test_extract_image_rejects_zip_without_an_image() -> None:
