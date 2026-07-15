@@ -19,7 +19,8 @@ from custom_components.netgear_poe.update import _extract_image, resolve_release
 from .conftest import MOCK_FIRMWARE, MOCK_MODEL, setup_integration
 
 UPDATE_ENTITY = "update.boiler_switch_firmware"
-GS110TP_OID = "1.3.6.1.4.1.4526.100.4.19"
+GS110TP_OID = "1.3.6.1.4.1.4526.100.4.19"  # the v1; v2/v3 are other products
+GS108TV2_OID = "1.3.6.1.4.1.4526.100.4.18"
 
 NEW_RELEASE = FirmwareRelease(
     version="9.9.9.9",
@@ -67,6 +68,30 @@ def test_resolve_known_newer() -> None:
     assert release.version == "5.4.2.35"
     assert release.url and release.url.endswith(".zip")
     assert release.notes_url and "kb.netgear.com" in release.notes_url
+
+
+def test_gs110tp_v1_is_not_offered_the_v2_firmware() -> None:
+    """5.4.2.35 is the last GS110TP (v1) build; 5.4.2.36 is v2-only.
+
+    The map picks the image Install writes to a live switch, so offering a
+    GS110TPv2 build to v1 hardware would flash the wrong firmware. v1 is what
+    reports this sysObjectID.
+    """
+    release = resolve_release("5.4.2.30", GS110TP_OID, "GS110TP")
+    assert release is not None
+    assert release.version == "5.4.2.35"
+    assert release.url and "GS108Tv2_GS110TP_V5.4.2.35" in release.url
+    # Not the GS110TPv2 build. ("v2" alone would match GS108Tv2 in the name.)
+    assert "gs110tpv2" not in release.url.lower()
+
+
+def test_gs108tv2_has_its_own_newer_release() -> None:
+    """The GS108Tv2 is a distinct sysObjectID and is still getting builds."""
+    release = resolve_release("5.4.2.35", GS108TV2_OID, "GS108Tv2")
+    assert release is not None
+    assert release.version == "5.4.2.36"
+    # It shares the release with the GS110TPv2, not with the GS110TP (v1).
+    assert release.url and "GS108Tv2_GS110TPv2_V5.4.2.36" in release.url
 
 
 def test_resolve_up_to_date_is_none() -> None:
