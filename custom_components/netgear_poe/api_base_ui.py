@@ -34,6 +34,7 @@ import logging
 import re
 from collections.abc import Callable
 from html import unescape
+from typing import ClassVar
 
 import aiohttp
 
@@ -257,20 +258,26 @@ class NetgearBaseUiApi:
         # These switches serve plain HTTP only; they have no TLS support.
         return f"http://{self.host}{path}"  # NOSONAR
 
+    # The login form's location and its exact field set. Subclasses for
+    # later firmware (the S350 "cheetah" UI) override these: the switch
+    # rejects a body carrying fields the form doesn't define.
+    _login_path = "/base/main_login.html"
+    _login_extra_fields: ClassVar[dict[str, str]] = {"login.x": "0", "login.y": "0"}
+
     async def async_login(self) -> None:
         """Authenticate and store the SID session cookie."""
         self._logged_in = False
         session = self._get_session()
         try:
             async with session.post(
-                self._url("/base/main_login.html"),
+                self._url(self._login_path),
                 data={
                     "pwd": self._password,
-                    "login.x": "0",
-                    "login.y": "0",
+                    **self._login_extra_fields,
                     "err_flag": "0",
                     "err_msg": "",
                 },
+                headers={"Referer": self._url("/")},
             ) as resp:
                 resp.raise_for_status()
                 text = await resp.text(encoding=_ENCODING)
@@ -295,8 +302,10 @@ class NetgearBaseUiApi:
         """
         session = self._get_session()
         url = self._url(path)
+        # Referer on every request: a browser always carries one, and the
+        # newer cheetah firmware answers 403 to any request without it.
         request = (
-            session.get(url)
+            session.get(url, headers={"Referer": self._url("/base/web_main.html")})
             if data is None
             else session.post(url, data=data, headers={"Referer": url})
         )
@@ -726,3 +735,157 @@ class NetgearBaseUiApi:
         if self._owns_session and self._session is not None:
             await self._session.close()
             self._session = None
+
+
+# Cheetah tables render each cell as an EmWeb hidden input whose NAME encodes
+# the row: "1.<index>.<count>.v_1_2_<col>", e.g. 1.5.24.v_1_2_2 is column 2 of
+# the sixth PoE port. The value is both the input's VALUE and the cell text.
+_CHEETAH_CELL_RE = re.compile(
+    r'NAME=1\.(\d+)\.\d+\.v_\d+_\d+_(\d+)\s+VALUE="([^"]*)"', re.I
+)
+# Its column order is fixed by firmware, keyed off the g-label always in col 1.
+_CHEETAH_POE_COLS = {1: "port", 2: "admin", 15: "power", 17: "status"}
+_CHEETAH_PORT_COLS = {1: "port", 2: "alias"}
+# The <td aid='1_<r>_1'> row on sysInfo.html: model, boot, then software.
+_CHEETAH_AID_RE = re.compile(r"aid=['\"]1_(\d+)_1['\"][^>]*>([^<]*)<", re.I)
+
+
+def _cheetah_rows(html: str, columns: dict[int, str]) -> list[dict[str, str]]:
+    """Group cheetah table cells into per-port rows keyed by column name."""
+    rows: dict[int, dict[str, str]] = {}
+    for index, col, value in _CHEETAH_CELL_RE.findall(html):
+        name = columns.get(int(col))
+        if name is not None:
+            rows.setdefault(int(index), {})[name] = unescape(value).strip()
+    # Only rows that carry a real "g<n>" port label are data rows.
+    return [
+        row
+        for _index, row in sorted(rows.items())
+        if _PORT_RE.match(row.get("port", ""))
+    ]
+
+
+class NetgearCheetahApi(NetgearBaseUiApi):
+    """Client for the S350-series ("cheetah") firmware, e.g. the GS324TP.
+
+    A hardened evolution of the same FASTPATH web UI: the login form moved
+    to /base/cheetah_login.html (same pwd/err_flag/submt convention, plus a
+    Refererless-request 403 the base class now always satisfies), and the
+    per-feature pages are compiled-in EmWeb routes at the site root rather
+    than files under /base/. Repeated failed logins trip a temporary
+    lockout, so a wrong password here stays wrong for a while even after
+    it is corrected.
+
+    The tables are laid out differently too: each cell is an EmWeb input
+    named "1.<index>.<count>.v_..._<col>" rather than a header-aligned <td>,
+    so the read helpers here parse by that scheme instead of by column
+    header. Writes are not implemented yet — the EmWeb submit echoes the
+    whole table back and wants careful, hardware-tested reverse engineering.
+    """
+
+    _login_path = "/base/cheetah_login.html"
+    # Its form defines exactly pwd/err_flag/err_msg/submt — no login.x/y.
+    _login_extra_fields: ClassVar[dict[str, str]] = {"submt": _SUBMIT}
+
+    # Firmware install is untested on this generation; keep it off until the
+    # dual-image/file pages are mapped and verified against real hardware.
+    supports_firmware_install = False
+
+    async def async_get_info(self) -> SwitchInfo:
+        """Return the switch's name, model and firmware version."""
+        html = await self._request("/base/system/management/sysInfo.html")
+        # The versions row renders as <td aid='1_2_1'>model</td>
+        # <td aid='1_3_1'>boot</td> <td aid='1_4_1'>software</td>.
+        aids = {int(r): text.strip() for r, text in _CHEETAH_AID_RE.findall(html)}
+        # The System Object OID is the one Netgear-enterprise OID on the page.
+        oid = re.search(r"(1\.3\.6\.1\.4\.1\.4526[\d.]*\d)", html)
+        return SwitchInfo(
+            name=_input_value(html, "sysName"),
+            model=aids.get(2, ""),
+            firmware=aids.get(4, ""),
+            sys_object_id=(oid.group(1) if oid else ""),
+        )
+
+    async def _async_consumed_power(self) -> float | None:
+        """Return the switch-wide PoE draw from the PoE config page."""
+        try:
+            html = await self._request("/poeConfiguration.html")
+        except NetgearError:
+            _LOGGER.debug("Could not read PoE consumption", exc_info=True)
+            return None
+        match = re.search(
+            r'basePoeGlobalConfig_MainPseConsumptionPower[^"]*"([\d.]+)"', html
+        )
+        if match is None:
+            match = re.search(
+                r'VALUE="([\d.]+)"[^<]*</TD>\s*<!--\s*'
+                r"basePoeGlobalConfig_MainPseConsumptionPower",
+                html,
+            )
+        return float(match.group(1)) if match else None
+
+    async def _async_fetch_port_names(self, retries: int = 0) -> dict[int, str]:
+        """Return {port: ifAlias} from the ports configuration page."""
+        last_exc: NetgearError | None = None
+        for attempt in range(retries + 1):
+            if attempt:
+                await asyncio.sleep(1.5)
+            try:
+                html = await self._request("/portsConfiguration.html")
+            except NetgearError as err:
+                last_exc = err
+                continue
+            names: dict[int, str] = {}
+            for row in _cheetah_rows(html, _CHEETAH_PORT_COLS):
+                match = _PORT_RE.match(row["port"])
+                alias = row.get("alias", "").strip()
+                if match and alias:
+                    names[int(match.group(1))] = alias
+            return names
+        raise last_exc or NetgearError("Could not fetch port names")
+
+    async def async_get_data(self) -> PoeData:
+        """Fetch PoE state for all ports."""
+        html = await self._request("/poeInterfaceConfiguration.html")
+        rows = _cheetah_rows(html, _CHEETAH_POE_COLS)
+        if not rows:
+            raise NetgearError("No PoE ports in poeInterfaceConfiguration response")
+
+        await self._async_refresh_port_names()
+        self._poll_count += 1
+
+        data = PoeData()
+        for row in rows:
+            match = _PORT_RE.match(row["port"])
+            if match is None:
+                continue
+            port = int(match.group(1))
+            status = row.get("status", "").lower()
+            data.ports[port] = PoePort(
+                port=port,
+                admin_enabled=row.get("admin") == "Enable",
+                detection_status=_DETECTION_STATUS.get(status, status or "unknown"),
+                power_watts=_float_or(row.get("power", "")),
+                alias=self._port_names.get(port, ""),
+                raw=dict(row),
+            )
+        data.consumption_watts = await self._async_consumed_power()
+        return data
+
+    async def async_set_port_enabled(self, port: int, enabled: bool) -> None:
+        """Not implemented on this generation yet."""
+        raise NetgearError(
+            "PoE control is not yet supported on S350-series (cheetah) switches"
+        )
+
+    async def async_set_port_name(self, port: int, name: str) -> None:
+        """Not implemented on this generation yet."""
+        raise NetgearError(
+            "Setting port names is not yet supported on S350-series switches"
+        )
+
+    async def async_power_cycle_port(self, port: int) -> None:
+        """Not implemented on this generation yet."""
+        raise NetgearError(
+            "Power cycling is not yet supported on S350-series (cheetah) switches"
+        )

@@ -13,7 +13,10 @@ from custom_components.netgear_poe.api import (
     NetgearPoeApi,
     SwitchInfo,
 )
-from custom_components.netgear_poe.api_base_ui import NetgearBaseUiApi
+from custom_components.netgear_poe.api_base_ui import (
+    NetgearBaseUiApi,
+    NetgearCheetahApi,
+)
 from custom_components.netgear_poe.api_legacy import (
     _REBOOT_POLL_ATTEMPTS,
     NetgearLegacyApi,
@@ -301,6 +304,21 @@ async def test_detect_api_base_ui() -> None:
     ):
         api = await async_detect_api("h", "pw")
     assert isinstance(api, NetgearBaseUiApi)
+    # The cheetah subclass shares the /base/ prefix, so order matters.
+    assert not isinstance(api, NetgearCheetahApi)
+
+
+async def test_detect_api_cheetah() -> None:
+    """A /base/cheetah_login.html form selects the S350 client (GS324TP)."""
+    session = _mock_session(
+        None, '<FORM METHOD="POST" ACTION="/base/cheetah_login.html">'
+    )
+    with patch(
+        "custom_components.netgear_poe.api_legacy.aiohttp.ClientSession",
+        return_value=session,
+    ):
+        api = await async_detect_api("h", "pw")
+    assert isinstance(api, NetgearCheetahApi)
 
 
 async def test_detect_api_modern() -> None:

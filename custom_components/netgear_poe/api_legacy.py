@@ -42,12 +42,14 @@ from .api import (
     PoePort,
     SwitchInfo,
 )
-from .api_base_ui import NetgearBaseUiApi
+from .api_base_ui import NetgearBaseUiApi, NetgearCheetahApi
 
 _LOGGER = logging.getLogger(__name__)
 
 # Any of the interchangeable per-generation clients async_detect_api returns.
-type NetgearAnyApi = NetgearPoeApi | NetgearLegacyApi | NetgearBaseUiApi
+type NetgearAnyApi = (
+    NetgearPoeApi | NetgearLegacyApi | NetgearBaseUiApi | NetgearCheetahApi
+)
 
 # The per-request path prefix: "csb" followed by hex, e.g. /csb555f027/.
 # It is NOT stable — the same switch answers with a different prefix over
@@ -57,6 +59,8 @@ type NetgearAnyApi = NetgearPoeApi | NetgearLegacyApi | NetgearBaseUiApi
 # hex to start with 'e' and carry no a-f after it.
 _PREFIX_RE = re.compile(r"/(csb[0-9a-f]+)/", re.I)
 _BASE_UI_RE = re.compile(r"/base/main_login\.html", re.I)
+# The S350 "cheetah" firmware posts its login to a different page.
+_CHEETAH_RE = re.compile(r"/base/cheetah_login\.html", re.I)
 _LOGIN_OK_CODES = {"0", "9", "10", "12", "13", "14"}
 _DETECTION_STATUS = {
     "1": "disabled",
@@ -648,6 +652,8 @@ async def async_detect_api(
         return NetgearLegacyApi(
             host=host, password=password, session=session, prefix=match.group(1)
         )
+    if _CHEETAH_RE.search(body):
+        return NetgearCheetahApi(host=host, password=password, session=session)
     if _BASE_UI_RE.search(body):
         return NetgearBaseUiApi(host=host, password=password, session=session)
     return NetgearPoeApi(host=host, password=password, session=session)
