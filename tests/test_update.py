@@ -107,14 +107,25 @@ def test_extract_image_passes_through_raw_stk() -> None:
     assert image == b"raw-stk-bytes"
 
 
-def test_extract_image_rejects_zip_without_stk() -> None:
-    """A zip with no .stk member is an error, not a silent flash of junk."""
+def test_extract_image_rejects_zip_without_an_image() -> None:
+    """A zip with no image member is an error, not a silent flash of junk."""
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
         archive.writestr("notes.html", "x")
     blob = buffer.getvalue()
-    with pytest.raises(HomeAssistantError, match=r"No \.stk"):
+    with pytest.raises(HomeAssistantError, match="No firmware image"):
         _extract_image(blob, "https://x/fw.zip")
+
+
+def test_extract_image_finds_ros_archive() -> None:
+    """The xui models ship a .ros image rather than the /base/ models' .stk."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("GS516TP_V6.0.1.30_Release_Notes.html", "<html>x</html>")
+        archive.writestr("GS516TP_V6.0.1.30.ros", b"ROS-IMAGE")
+    filename, image = _extract_image(buffer.getvalue(), "https://x/fw.zip")
+    assert filename == "GS516TP_V6.0.1.30.ros"
+    assert image == b"ROS-IMAGE"
 
 
 async def test_update_entity_up_to_date(

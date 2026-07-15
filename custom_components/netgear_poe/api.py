@@ -104,6 +104,25 @@ class PoeData:
     link: dict[int, bool] = field(default_factory=dict)
 
 
+@dataclass
+class DualImageStatus:
+    """What each firmware slot holds and which one the switch is running.
+
+    Both firmware-capable generations keep two flash slots and boot whichever
+    is marked next-active, so an upgrade writes to the inactive one and the
+    running image stays as a rollback.
+    """
+
+    versions: dict[str, str]  # {"image1": "5.4.2.35", "image2": "5.4.2.33"}
+    current_active: str  # the slot the switch booted from
+    next_active: str  # the slot it will boot next
+
+    @property
+    def inactive(self) -> str:
+        """The slot that is safe to overwrite."""
+        return "image2" if self.current_active == "image1" else "image1"
+
+
 class NetgearPoeApi:
     """Async client for PoE control over the switch's web API."""
 

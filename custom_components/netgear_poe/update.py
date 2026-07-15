@@ -59,15 +59,24 @@ def resolve_release(
     return release
 
 
+# The flashable member of Netgear's zip: .stk on the classic /base/ models,
+# .ros on the xui ones. The rest of the zip is release notes.
+_IMAGE_SUFFIXES = (".stk", ".ros")
+
+
 def _extract_image(blob: bytes, url: str) -> tuple[str, bytes]:
-    """Return (filename, image) from a download; Netgear zips the .stk."""
+    """Return (filename, image) from a download; Netgear zips the image."""
     if not blob.startswith(b"PK"):
         return url.rsplit("/", 1)[-1], blob
     with zipfile.ZipFile(io.BytesIO(blob)) as archive:
         for name in archive.namelist():
-            if name.lower().endswith(".stk"):
+            if name.lower().endswith(_IMAGE_SUFFIXES):
                 return name.rsplit("/", 1)[-1], archive.read(name)
-    raise HomeAssistantError("No .stk firmware image in the downloaded archive")
+    raise HomeAssistantError(
+        "No firmware image ("
+        + "/".join(_IMAGE_SUFFIXES)
+        + ") in the downloaded archive"
+    )
 
 
 async def async_setup_entry(

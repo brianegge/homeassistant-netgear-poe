@@ -68,13 +68,26 @@ JSON generation. Only the probe is authoritative.
   see the module docstring in `api_base_ui.py`. The switch answers `400` if a
   posted body carries a field that page's form doesn't define, so each form
   sends exactly its own field set.
-- **Firmware install (/base/ UI only)** — `LATEST_FIRMWARE` in `const.py` maps
-  sysObjectID → `FirmwareRelease` (version + Netgear download URL + KB link).
-  `async_install_firmware` uploads the `.stk` to the **inactive** dual-image
-  slot (the running firmware stays as a rollback), activates it and reboots
-  via `system/sys_reset.html`. Never post `system/reset_cfg.html` — that
-  near-identical form is "Factory Default" and wipes the config. The reboot
-  drops PoE and the switch's uplink for ~1 minute.
+- **Firmware install** — `LATEST_FIRMWARE` in `const.py` maps sysObjectID →
+  `FirmwareRelease` (version + Netgear download URL + KB link). Both the
+  classic and xui backends implement `async_install_firmware`
+  (`supports_firmware_install`); the JSON CGI one does not. Either way the
+  image goes to the **inactive** dual-image slot, so the running firmware
+  stays flashed as a rollback, and the final reboot drops PoE and the
+  switch's uplink for a minute or more.
+  - *Classic /base/*: upload `.stk` to `system/http_file_download.html`
+    (`localfilename` picks the slot), activate `system/dual_image_cfg.html`,
+    reboot `system/sys_reset.html`. Never post `system/reset_cfg.html` —
+    that near-identical form is "Factory Default" and wipes the config. The
+    switch reports nothing while it writes flash, so progress sits at 20%.
+  - *xui*: upload the `.ros` archive to `Maintenance/httpConfigProcess.htm`
+    (`rlCopyDestinationFileType=8`); there is no slot field — the switch
+    writes to the inactive slot itself. It answers **302 on success**, so
+    the POST bypasses `_attempt_request` (which reads 302 as a dead
+    session). `{LoadStatus}` reports `copyStatusType` (1/2 busy, 5 done,
+    3/4 failed) plus `bytesTransfered`, polled alongside the upload exactly
+    as the vendor UI's iframe does — the one real progress signal we get.
+    Activate via `{ImageUnitList}` `nextBootImage`, reboot via `{Reload}`.
 - **Link state / port names** — SNMP v2c: `ifOperStatus` (link) and `ifAlias`
   (names, same source as LibreNMS). Preferred over the web CGI for names.
 - **Instant events** — SNMP trap receiver on UDP 162 (`linkUp`/`linkDown`).

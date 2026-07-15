@@ -33,12 +33,12 @@ import asyncio
 import logging
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
 from html import unescape
 
 import aiohttp
 
 from .api import (
+    DualImageStatus,
     NetgearAuthError,
     NetgearError,
     PoeData,
@@ -185,20 +185,6 @@ def _parse_port_names(html: str) -> dict[int, str] | None:
         if match and descr:
             names[int(match.group(1))] = descr
     return names
-
-
-@dataclass
-class DualImageStatus:
-    """What each firmware slot holds and which one the switch is running."""
-
-    versions: dict[str, str]  # {"image1": "5.4.2.35", "image2": "5.4.2.33"}
-    current_active: str  # the slot the switch booted from
-    next_active: str  # the slot it will boot next
-
-    @property
-    def inactive(self) -> str:
-        """The slot that is safe to overwrite."""
-        return "image2" if self.current_active == "image1" else "image1"
 
 
 def _parse_image_status(html: str) -> DualImageStatus:
