@@ -320,10 +320,10 @@ class NetgearPoeApi:
         fields = {
             "portList": quote(str(row.get("portName", port)), safe=""),
             "descp": quote(name, safe=""),
-            "adminStatus": _port_edit_value(row.get("adminStatus"), "on"),
-            "adminSpeed": _port_edit_value(row.get("adminSpeed"), "auto"),
-            "adminDuplex": _port_edit_value(row.get("adminDuplex"), "auto"),
-            "adminFlowCtrl": _port_edit_value(row.get("adminFlowCtrl"), "disable"),
+            "adminStatus": _port_edit_value(row, "adminStatus"),
+            "adminSpeed": _port_edit_value(row, "adminSpeed"),
+            "adminDuplex": _port_edit_value(row, "adminDuplex"),
+            "adminFlowCtrl": _port_edit_value(row, "adminFlowCtrl"),
             "xsrf": "undefined",
         }
         result = await self._authed_request(
@@ -426,17 +426,25 @@ def _parse_lang_key(value: str, prefix: str) -> str:
     return key
 
 
-def _port_edit_value(value: Any, default: str) -> str:
+def _port_edit_value(row: dict[str, Any], field: str) -> str:
     """Map a port_port row value to the label the port edit form posts.
 
-    Rows carry lang() artifacts like lang('common','lblAuto') or numeric
-    flags; the set form wants lowercase labels ("on", "auto", "disable").
+    Rows carry lang() artifacts like lang('common','lblAuto') or, for the
+    admin status, numeric flags; the set form wants lowercase labels ("on",
+    "auto", "disable"). The edit form echoes every link setting back, so a
+    value this can't read is an error: defaulting it would silently rewrite
+    the port's configuration on a rename.
     """
+    value = row.get(field)
     if value in (None, ""):
-        return default
+        raise NetgearError(f"Port settings incomplete ({field} missing); not renaming")
     text = str(value)
     if text.isdigit():
-        return default if int(text) else "disable"
+        # Only the admin status is a plain on/off flag; a numeric speed,
+        # duplex or flow-control code has no safe label to map to.
+        if field == "adminStatus":
+            return "on" if int(text) else "disable"
+        raise NetgearError(f"Port settings unreadable ({field}={text!r}); not renaming")
     label = _parse_lang_key(text, "lbl").lower()
     return {"enabled": "on", "enable": "on", "disabled": "disable"}.get(label, label)
 

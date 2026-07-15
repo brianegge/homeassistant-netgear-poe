@@ -177,8 +177,12 @@ async def test_set_port_name_posts_edit_form() -> None:
     assert api._port_names[1] == "garage cam"
 
 
-async def test_set_port_name_defaults_without_row_settings() -> None:
-    """A sparse row (no name/link fields) falls back to safe defaults."""
+async def test_set_port_name_refuses_sparse_row() -> None:
+    """A row without link settings aborts the rename rather than guessing.
+
+    The edit form echoes every link setting back, so defaulting a missing
+    one ("on"/"auto"/"disable") would rewrite the port's configuration.
+    """
     api = NetgearPoeApi("host", "pw")
     calls: list[tuple[str, str, str | None]] = []
 
@@ -190,16 +194,23 @@ async def test_set_port_name_defaults_without_row_settings() -> None:
 
     api._authed_request = AsyncMock(side_effect=fake_request)
     api._port_names = {2: "stale"}
-    await api.async_set_port_name(2, "")
 
-    _cgi, _cmd, body = calls[-1]
-    assert body is not None
-    assert "portList=2" in body
-    assert "descp=&" in body
-    assert "adminStatus=on" in body
-    assert "adminFlowCtrl=disable" in body
-    # Clearing the description drops the cached alias.
-    assert 2 not in api._port_names
+    with pytest.raises(NetgearError, match="adminStatus missing"):
+        await api.async_set_port_name(2, "")
+
+    # Nothing was written and the cached alias is untouched.
+    assert all(cmd != "port_portEdit" for _cgi, cmd, _body in calls)
+    assert api._port_names[2] == "stale"
+
+
+async def test_set_port_name_refuses_numeric_speed() -> None:
+    """A numeric speed code has no safe form label, so the rename aborts."""
+    api = NetgearPoeApi("host", "pw")
+    row = dict(PORT_PORT_RESPONSE["data"]["ports"][0], adminSpeed="3")
+    api._authed_request = AsyncMock(return_value={"data": {"ports": [row]}})
+
+    with pytest.raises(NetgearError, match="adminSpeed='3'"):
+        await api.async_set_port_name(1, "cam")
 
 
 async def test_set_port_name_unknown_port() -> None:
