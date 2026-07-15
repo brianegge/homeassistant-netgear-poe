@@ -42,7 +42,13 @@ _LOGGER = logging.getLogger(__name__)
 # Any of the interchangeable per-generation clients async_detect_api returns.
 type NetgearAnyApi = NetgearPoeApi | NetgearLegacyApi | NetgearBaseUiApi
 
-_PREFIX_RE = re.compile(r"/(csbe\d+)/")
+# The per-request path prefix: "csb" followed by hex, e.g. /csb555f027/.
+# It is NOT stable — the same switch answers with a different prefix over
+# time, and every xui switch on a network answers with the same one at any
+# given moment, so it can't be cached across logins (async_login re-reads it).
+# Matching only "csbe" + digits, as this once did, works by luck: it needs the
+# hex to start with 'e' and carry no a-f after it.
+_PREFIX_RE = re.compile(r"/(csb[0-9a-f]+)/", re.I)
 _BASE_UI_RE = re.compile(r"/base/main_login\.html", re.I)
 _LOGIN_OK_CODES = {"0", "9", "10", "12", "13", "14"}
 _DETECTION_STATUS = {

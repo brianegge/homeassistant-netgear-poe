@@ -233,7 +233,7 @@ def _mock_session(location: str | None, body: str = "") -> MagicMock:
 
 
 async def test_detect_api_legacy() -> None:
-    """A /csbe<id>/ redirect selects the legacy client with its prefix."""
+    """A /csb<hex>/ redirect selects the legacy client with its prefix."""
     session = _mock_session(
         "http://h/csbe123/config/log_off_page.htm"  # NOSONAR — mock redirect
     )
@@ -260,6 +260,29 @@ async def test_detect_api_releases_probe_response() -> None:
     session.get.return_value.__aexit__.assert_awaited_once()
     # A caller-supplied session is the caller's to close.
     session.close.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "csb555f027",  # real: hex with letters after "csb" — the common case
+        "csbe116353",  # real: happens to be "csbe" + digits
+        "csbE116353",  # same, upper case
+        "csb0a1b2c3",
+    ],
+)
+async def test_detect_api_legacy_accepts_any_hex_prefix(prefix: str) -> None:
+    """The prefix is "csb" + hex, not "csbe" + digits.
+
+    It is recomputed rather than fixed per device, so a switch that answered
+    "csbe116353" once can answer "csb555f027" later; matching only the digit
+    form silently misroutes the switch to the JSON client.
+    """
+    session = _mock_session(f"http://h/{prefix}/index.htm")  # NOSONAR — mock
+    api = await async_detect_api("h", "pw", session=session)
+
+    assert isinstance(api, NetgearLegacyApi)
+    assert api._prefix == prefix
 
 
 async def test_detect_api_base_ui() -> None:
