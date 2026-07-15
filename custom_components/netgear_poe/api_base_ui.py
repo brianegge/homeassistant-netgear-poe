@@ -193,7 +193,7 @@ class NetgearBaseUiApi:
         self._logged_in = False
         session = self._get_session()
         try:
-            resp = await session.post(
+            async with session.post(
                 self._url("/base/main_login.html"),
                 data={
                     "pwd": self._password,
@@ -202,9 +202,9 @@ class NetgearBaseUiApi:
                     "err_flag": "0",
                     "err_msg": "",
                 },
-            )
-            resp.raise_for_status()
-            text = await resp.text(encoding=_ENCODING)
+            ) as resp:
+                resp.raise_for_status()
+                text = await resp.text(encoding=_ENCODING)
         except (aiohttp.ClientError, TimeoutError) as err:
             raise NetgearError(f"Login request failed: {err}") from err
 
@@ -218,19 +218,23 @@ class NetgearBaseUiApi:
     async def _attempt_request(
         self, path: str, data: dict[str, str] | None
     ) -> str | None:
-        """One HTTP attempt; None means the session was rejected."""
+        """One HTTP attempt; None means the session was rejected.
+
+        The session is long-lived, so the response is entered as a context
+        manager: raise_for_status() releases the connection itself, but a
+        failure part-way through reading the body would not.
+        """
         session = self._get_session()
+        url = self._url(path)
+        request = (
+            session.get(url)
+            if data is None
+            else session.post(url, data=data, headers={"Referer": url})
+        )
         try:
-            if data is None:
-                resp = await session.get(self._url(path))
-            else:
-                resp = await session.post(
-                    self._url(path),
-                    data=data,
-                    headers={"Referer": self._url(path)},
-                )
-            resp.raise_for_status()
-            text = await resp.text(encoding=_ENCODING)
+            async with request as resp:
+                resp.raise_for_status()
+                text = await resp.text(encoding=_ENCODING)
         except (aiohttp.ClientError, TimeoutError) as err:
             raise NetgearError(f"Request {path} failed: {err}") from err
         # An expired session silently serves the login page instead.

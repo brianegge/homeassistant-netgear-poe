@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiohttp
 import pytest
 
 from custom_components.netgear_poe.api import NetgearAuthError, NetgearError
@@ -216,11 +217,13 @@ async def test_fetch_port_names_raises_after_last_retry() -> None:
     api = NetgearBaseUiApi("host", "pw")
     api._request = AsyncMock(side_effect=NetgearError("boom"))
 
-    with patch(
-        "custom_components.netgear_poe.api_base_ui.asyncio.sleep", new=AsyncMock()
+    with (
+        patch(
+            "custom_components.netgear_poe.api_base_ui.asyncio.sleep", new=AsyncMock()
+        ),
+        pytest.raises(NetgearError, match="boom"),
     ):
-        with pytest.raises(NetgearError, match="boom"):
-            await api._async_fetch_port_names(retries=2)
+        await api._async_fetch_port_names(retries=2)
 
     assert api._request.await_count == 3
 
@@ -355,8 +358,13 @@ def _login_session(with_sid: bool) -> MagicMock:
     resp.text = AsyncMock(
         return_value="<html>ok</html>" if with_sid else LOGIN_FAILED_HTML
     )
+    # aiohttp's session.post() returns a context manager, and the client uses
+    # it as one so the response is released on every path.
+    ctx = MagicMock()
+    ctx.__aenter__ = AsyncMock(return_value=resp)
+    ctx.__aexit__ = AsyncMock(return_value=False)
     session = MagicMock()
-    session.post = AsyncMock(return_value=resp)
+    session.post = MagicMock(return_value=ctx)
     session.cookie_jar = [MagicMock(key="SID")] if with_sid else []
     return session
 
@@ -366,6 +374,24 @@ async def test_login_success_sets_session() -> None:
     api = NetgearBaseUiApi("host", "pw", session=_login_session(True))
     await api.async_login()
     assert api._logged_in is True
+
+
+async def test_login_releases_response_when_body_read_fails() -> None:
+    """A failure part-way through the body still releases the connection.
+
+    raise_for_status() releases on a non-2xx itself, but a mid-body error
+    would otherwise strand a connection in this long-lived session.
+    """
+    session = _login_session(True)
+    session.post.return_value.__aenter__.return_value.text = AsyncMock(
+        side_effect=aiohttp.ClientPayloadError("truncated")
+    )
+    api = NetgearBaseUiApi("host", "pw", session=session)
+
+    with pytest.raises(NetgearError, match="Login request failed"):
+        await api.async_login()
+
+    session.post.return_value.__aexit__.assert_awaited_once()
 
 
 async def test_login_rejected_without_sid_cookie() -> None:
