@@ -41,15 +41,25 @@ homeassistant-netgear-poe/
 
 ## Firmware generations
 
-Three incompatible web UIs are in the wild. `async_detect_api` (in
-`api_legacy.py`) probes `GET /` once and picks the client; all three expose the
+Four incompatible web UIs are in the wild. `async_detect_api` (in
+`api_legacy.py`) probes `GET /` once and picks the client; all expose the
 same interface, so everything above them is generation-agnostic.
 
 | Client | Firmware / models | Detected by |
 | --- | --- | --- |
-| `NetgearPoeApi` | JSON CGI (GS728TPv2, GS3xx) | neither of the below |
-| `NetgearLegacyApi` | xui XML (GS516TP, 6.0.x) | 302 → `/csbe<id>/` |
+| `NetgearPoeApi` | JSON CGI (GS728TPv2, GS3xx) | none of the below |
+| `NetgearLegacyApi` | xui XML (GS516TP, 6.0.x) | 302 → `/csb<hex>/` |
 | `NetgearBaseUiApi` | classic HTML (GS110TP, 5.4.x) | `/base/main_login.html` in body |
+| `NetgearCheetahApi` | S350 EmWeb (GS324TP, 1.0.x) | `/base/cheetah_login.html` in body |
+
+`NetgearCheetahApi` subclasses `NetgearBaseUiApi` (shared FASTPATH login,
+Referer-on-every-request). Its probe branch runs **before** the `/base/` one
+since both live under `/base/`. Its pages are EmWeb routes at the site root
+(`/poeInterfaceConfiguration.html`) whose cells are hidden inputs named
+`1.<index>.<count>.v_..._<col>`; a PoE write echoes the whole table back with
+one admin cell changed. PoE control works; the ifAlias write and firmware
+install are not implemented for this generation yet. Its login locks out
+after repeated failures, so a wrong password stays wrong for ~15 min.
 
 Model names don't decide this — a GS110TPv3 is newer silicon and answers as the
 JSON generation. Only the probe is authoritative.

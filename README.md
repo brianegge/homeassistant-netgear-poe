@@ -1,12 +1,12 @@
 # Netgear PoE Switch for Home Assistant
 
 Control PoE power on Netgear Smart Managed Pro switches (e.g. GS728TPv2,
-GS516TP, GS110TP) from Home Assistant, using the switch's web management
-API. Built to power-cycle stubborn PoE devices (cameras, APs) from
-automations.
+GS516TP, GS110TP, GS324TP) from Home Assistant, using the switch's web
+management API. Built to power-cycle stubborn PoE devices (cameras, APs)
+from automations.
 
 Note: these switches expose only read-only MIB-2 over SNMP, so PoE control
-goes through the same web API the switch's UI uses. Three firmware
+goes through the same web API the switch's UI uses. Four firmware
 generations are supported and detected automatically — the integration
 probes the switch rather than trusting the model name, since revisions of
 one model (a GS110TP vs a GS110TPv3) can speak different APIs:
@@ -15,13 +15,17 @@ one model (a GS110TP vs a GS110TPv3) can speak different APIs:
   `/cgi/get.cgi`, `/cgi/set.cgi`. Protocol notes:
   <https://github.com/tai/gs310tp>.
 - **Legacy XML "xui"** (GS516TP-class, Marvell firmware 6.0.x): the UI
-  served under a per-device `/csbe<id>/` path prefix, with data over the
+  served under a per-device `/csb<hex>/` path prefix, with data over the
   `wcd` XML endpoint. These switches have no native PoE reset, so power
   cycling toggles PoE off and back on.
 - **Classic HTML** (GS110TP-class, Broadcom firmware 5.4.x): the frames-based
   UI under `/base/`, driven by posting the same forms a browser would. These
   switches have no native PoE reset either, and don't support registering an
   SNMP trap destination (link state falls back to polling).
+- **S350 EmWeb** (GS324TP-class, firmware 1.0.x): a hardened evolution of
+  the classic UI with pages served as compiled-in routes at the site root.
+  PoE on/off and power cycling work; setting port names (use SNMP `ifAlias`)
+  and firmware install are not supported on this generation yet.
 
 ## Entities
 

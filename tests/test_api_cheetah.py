@@ -140,15 +140,88 @@ async def test_get_data_without_ports_raises() -> None:
         await api.async_get_data()
 
 
-async def test_writes_are_refused_for_now() -> None:
-    """Control is not implemented yet and must fail loudly, not silently."""
+async def test_set_port_enabled_posts_whole_table_with_one_cell_changed() -> None:
+    """Only the target port's admin cell changes; every other field replays.
+
+    The switch echoes the whole table; replaying it verbatim is what keeps a
+    single-port write from disturbing the other 23 ports.
+    """
+    api = _api()
+    await api.async_set_port_enabled(3, False)  # g3 is index 2
+
+    path, body = (
+        api._request.await_args.args[0],
+        api._request.await_args.kwargs["data"],
+    )
+    assert path == "/poeInterfaceConfiguration.html/a1"
+    # Target g3 (index 2) admin cell flipped to Disable...
+    assert body["1.2.24.v_1_2_2"] == "Disable"
+    assert body["1.2.24.gecb_1_2"] == "on"
+    # ...and submit_flag is the Apply op (8), not the form's reload default (0).
+    assert body["submit_flag"] == "8"
+    # ...while g1 and g2 admin cells ride along at their current values.
+    assert body["1.0.24.v_1_2_2"] == "Disable"
+    assert body["1.1.24.v_1_2_2"] == "Enable"
+    # Read-only status/power cells are echoed too (browser posts all hidden).
+    assert body["1.2.24.v_1_2_17"] == "Delivering Power"
+
+
+async def test_set_port_enabled_enable_sends_enable() -> None:
+    """Enabling posts Enable in the target admin cell."""
+    api = _api()
+    await api.async_set_port_enabled(1, True)
+    assert api._request.await_args.kwargs["data"]["1.0.24.v_1_2_2"] == "Enable"
+
+
+async def test_set_port_enabled_unknown_port_raises() -> None:
+    """A port absent from the table is an error, not a silent no-op."""
+    api = _api()
+    with pytest.raises(NetgearError, match="not found"):
+        await api.async_set_port_enabled(99, True)
+
+
+async def test_set_port_enabled_surfaces_switch_error() -> None:
+    """err_flag=1 on the returned page raises with the switch's reason."""
+    error_page = POE_HTML.replace(
+        "</table>",
+        '</table><INPUT type=hidden name="err_flag" VALUE="1">'
+        '<INPUT type=hidden name="err_msg" VALUE="Power budget exceeded">',
+    )
+    api = _api()
+
+    async def fake_request(path: str, data: dict[str, str] | None = None) -> str:
+        if path.endswith("/a1"):
+            return error_page
+        return POE_HTML if "poeInterface" in path else PAGES.get("x", POE_HTML)
+
+    api._request.side_effect = fake_request
+    with pytest.raises(NetgearError, match="Power budget exceeded"):
+        await api.async_set_port_enabled(1, False)
+
+
+async def test_power_cycle_toggles_off_then_on() -> None:
+    """Power cycle is inherited: off, wait, on — driving set_port_enabled."""
+    from unittest.mock import patch
+
+    api = _api()
+    calls: list[bool] = []
+
+    async def record(port: int, enabled: bool) -> None:
+        calls.append(enabled)
+
+    api.async_set_port_enabled = record
+    with patch(
+        "custom_components.netgear_poe.api_base_ui.asyncio.sleep", new=AsyncMock()
+    ):
+        await api.async_power_cycle_port(1)
+    assert calls == [False, True]
+
+
+async def test_set_port_name_still_unsupported() -> None:
+    """The ifAlias write is a separate form, not done yet."""
     api = _api()
     with pytest.raises(NetgearError, match="not yet supported"):
-        await api.async_set_port_enabled(1, True)
-    with pytest.raises(NetgearError, match="not yet supported"):
         await api.async_set_port_name(1, "x")
-    with pytest.raises(NetgearError, match="not yet supported"):
-        await api.async_power_cycle_port(1)
 
 
 async def test_firmware_install_unsupported() -> None:
