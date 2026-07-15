@@ -342,13 +342,16 @@ async def async_detect_api(
     probe_session = session or aiohttp.ClientSession(timeout=timeout)
     try:
         try:
-            resp = await probe_session.get(
+            # async with: the legacy branch never reads the body, so without it
+            # the response would keep a connection out of a caller-supplied
+            # session's pool.
+            async with probe_session.get(
                 f"http://{host}/",  # NOSONAR — probing the HTTP-only web UI
                 allow_redirects=False,
-            )
-            match = _PREFIX_RE.search(resp.headers.get("Location", ""))
-            # Only the non-redirecting generations need their body inspected.
-            body = "" if match else await resp.text(errors="replace")
+            ) as resp:
+                match = _PREFIX_RE.search(resp.headers.get("Location", ""))
+                # Only the non-redirecting generations need their body read.
+                body = "" if match else await resp.text(errors="replace")
         except (aiohttp.ClientError, TimeoutError) as err:
             raise NetgearError(f"Cannot connect to {host}: {err}") from err
     finally:

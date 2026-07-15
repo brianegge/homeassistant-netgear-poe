@@ -221,8 +221,13 @@ def _mock_session(location: str | None, body: str = "") -> MagicMock:
     resp = MagicMock()
     resp.headers = {"Location": location} if location else {}
     resp.text = AsyncMock(return_value=body)
+    # aiohttp's session.get() returns a context manager, and async_detect_api
+    # uses it as one so the probe response is always released.
+    ctx = MagicMock()
+    ctx.__aenter__ = AsyncMock(return_value=resp)
+    ctx.__aexit__ = AsyncMock(return_value=False)
     session = MagicMock()
-    session.get = AsyncMock(return_value=resp)
+    session.get = MagicMock(return_value=ctx)
     session.close = AsyncMock()
     return session
 
@@ -240,6 +245,21 @@ async def test_detect_api_legacy() -> None:
     assert isinstance(api, NetgearLegacyApi)
     assert api._prefix == "csbe123"
     session.close.assert_awaited_once()
+
+
+async def test_detect_api_releases_probe_response() -> None:
+    """The probe response is released even when its body is never read.
+
+    The legacy branch returns on the redirect header alone, so nothing else
+    would hand the connection back to a caller-supplied session.
+    """
+    session = _mock_session("http://h/csbe123/index.htm")  # NOSONAR — mock
+    api = await async_detect_api("h", "pw", session=session)
+
+    assert isinstance(api, NetgearLegacyApi)
+    session.get.return_value.__aexit__.assert_awaited_once()
+    # A caller-supplied session is the caller's to close.
+    session.close.assert_not_called()
 
 
 async def test_detect_api_base_ui() -> None:
