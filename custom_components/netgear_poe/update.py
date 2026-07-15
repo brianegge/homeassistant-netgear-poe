@@ -132,13 +132,24 @@ class NetgearPoeFirmwareUpdate(NetgearPoeEntity, UpdateEntity):
     ) -> None:
         """Download the release and install it on the switch.
 
-        The switch reboots at the end, dropping PoE (cameras, APs) and its
-        own network link for around a minute.
+        Polling is suspended for the duration. These switches allow very few
+        concurrent web sessions (as few as four) and take tens of minutes to
+        write flash, so a 30-second poll would both compete for a session slot
+        and hammer a switch that is busy upgrading. The switch also reboots at
+        the end, dropping PoE (cameras, APs) and its own link.
         """
         release = self._release
         if release is None or not release.url:
             raise HomeAssistantError("No downloadable firmware known for this switch")
         self._report_progress(1)
+        coordinator = self.coordinator
+        poll_interval = coordinator.update_interval
+        # Suspend polling: clearing the interval stops future refreshes, and
+        # unscheduling drops the one already queued (the coordinator has no
+        # public pause API). Without the second call a poll still lands in the
+        # first 30 s of the install.
+        coordinator.update_interval = None
+        coordinator._unschedule_refresh()
         try:
             filename, image = await self._async_download(release.url)
             self._report_progress(10)
@@ -151,6 +162,7 @@ class NetgearPoeFirmwareUpdate(NetgearPoeEntity, UpdateEntity):
         except NetgearError as err:
             raise HomeAssistantError(f"Firmware install failed: {err}") from err
         finally:
+            coordinator.update_interval = poll_interval  # resume polling
             self._attr_in_progress = False
             self._attr_update_percentage = None
             self.async_write_ha_state()

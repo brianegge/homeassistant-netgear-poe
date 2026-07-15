@@ -86,4 +86,16 @@ LATEST_FIRMWARE: Final[dict[str, FirmwareRelease]] = {
         ),
         notes_url="https://kb.netgear.com/000062485/GS516TP-Firmware-Version-6-0-1-30",
     ),
+    # GS324T / GS324TP (S350). Netgear ships one image for both, from the
+    # GS324T directory.
+    "1.3.6.1.4.1.4526.100.4.55": FirmwareRelease(
+        version="1.0.0.44",
+        url=(
+            "https://www.downloads.netgear.com/files/GDC/GS324T/"
+            "GS324Tv1_GS324TPv1_V1.0.0.44.zip"
+        ),
+        notes_url=(
+            "https://kb.netgear.com/000066439/GS324T-GS324TP-Firmware-Version-1-0-0-44"
+        ),
+    ),
 }

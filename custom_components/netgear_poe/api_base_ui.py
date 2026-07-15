@@ -795,6 +795,104 @@ _CHEETAH_CONTROL_FIELDS = (
 # but never applies — so an edit only takes effect when we send 8.
 _CHEETAH_SUBMIT_OP = "8"
 
+# Firmware pages (EmWeb routes at the site root). "File Download" is Netgear's
+# name for a download *to* the switch.
+_CHEETAH_UPLOAD_PATH = "/http_file_download.html"
+_CHEETAH_IMAGE_STATUS_PATH = "/dualImageStatus.html"
+_CHEETAH_DUAL_IMAGE_PATH = "/dualImageConfiguration.html"
+_CHEETAH_REBOOT_PATH = "/deviceReboot.html"
+# Upload form fields: file type is an *enum* combo, so it posts the index into
+# L7_FILE_TYPES_t (0 = "Code"); posting the label is rejected outright. The
+# image-name combo is a plain string, so it posts "image1"/"image2".
+_CHEETAH_FILE_TYPE_FIELD = "v_1_10_1"
+_CHEETAH_FILE_TYPE_CODE = "0"
+_CHEETAH_UPLOAD_SLOT_FIELD = "v_1_2_2"
+_CHEETAH_UPLOAD_FILE_FIELD = ".v_1_3_1_handle"
+# "Transfer In Progress" (L7_BOOL: "In progress" / " not in progress").
+_CHEETAH_TRANSFER_FIELD = "v_1_3_2"
+_CHEETAH_IN_PROGRESS = "In progress"
+# Activate form: image select, and the "Activate Image" checkbox (enable_t,
+# posted as a string — "Enable" is checked).
+_CHEETAH_ACTIVATE_SLOT_FIELD = "v_4_1_1"
+_CHEETAH_ACTIVATE_FIELD = "v_4_3_1"
+# Reboot form: "Check this box and click APPLY" (enable_t, same encoding).
+_CHEETAH_REBOOT_CONFIRM_FIELD = "v_1_2_1"
+_CHEETAH_CHECKED = "Enable"
+# The switch buffers the image in seconds but then writes flash in the
+# background for tens of minutes (a 3 MB image takes 5+ min on this family, so
+# a 26 MB one runs far longer). Poll the transfer flag, not the version.
+_CHEETAH_FLASH_POLL_SECONDS = 15
+_CHEETAH_FLASH_POLL_ATTEMPTS = 240  # up to an hour
+# Polls to allow before concluding the switch never began writing: the flash
+# starts within seconds, so this only avoids a race on the very first read.
+_CHEETAH_FLASH_START_GRACE = 4
+
+
+def _cheetah_field_value(html: str, name: str) -> str:
+    """Return a cheetah form field's VALUE (its NAME may be unquoted)."""
+    match = re.search(
+        rf'NAME=["\']?{re.escape(name)}["\']?[^>]*VALUE="([^"]*)"', html, re.I
+    )
+    return unescape(match.group(1)) if match else ""
+
+
+def _cheetah_form(html: str, action: str) -> str:
+    """Return just the form whose ACTION ends with `action`.
+
+    These pages carry more than one form — a small "a0" applet form sits
+    above the real "a1" one. Scoping matters: the switch quietly drops a
+    submission that carries a field the target form doesn't define, so a
+    body scraped from the whole page uploads cleanly and flashes nothing.
+    """
+    match = re.search(rf'<FORM[^>]*ACTION="[^"]*{re.escape(action)}"', html, re.I)
+    if match is None:
+        raise NetgearError(f"Could not find the {action} form on the switch")
+    end = html.find("</FORM>", match.end())
+    return html[match.end() : end if end > 0 else len(html)]
+
+
+def _cheetah_replay_ordered(
+    html: str, changes: dict[str, str]
+) -> list[tuple[str, str | None]]:
+    """Replay a cheetah form's posted fields *in document order*.
+
+    Pass only the target form's markup (see _cheetah_form). The EmWeb submit
+    posts the whole form back with only the edited controls altered, so
+    replaying verbatim is what keeps one change from disturbing anything
+    else, and submit_flag is forced to "apply". Order is preserved because
+    the multipart parser is positional. The file input is yielded as a
+    (name, None) placeholder for the caller to fill.
+    """
+    fields: list[tuple[str, str | None]] = []
+    for match in re.finditer(
+        r'NAME=("?)([.\w]+)\1[^>]*(?:TYPE=(file)\b[^>]*)?VALUE="([^"]*)"', html, re.I
+    ):
+        name, value = match.group(2), unescape(match.group(4))
+        if name.endswith("_handle"):
+            fields.append((name, None))  # the file goes exactly here
+            continue
+        if name == "submit_flag":
+            value = _CHEETAH_SUBMIT_OP
+        elif name in changes:
+            value = changes[name]
+        fields.append((name, value))
+    have = {n for n, _ in fields}
+    for name, value in changes.items():
+        if name not in have:
+            fields.append((name, value))
+    if "submit_flag" not in have:
+        fields.append(("submit_flag", _CHEETAH_SUBMIT_OP))
+    return fields
+
+
+def _cheetah_replay(html: str, changes: dict[str, str]) -> dict[str, str]:
+    """Replay a cheetah form as a plain body (no file part)."""
+    return {
+        name: value
+        for name, value in _cheetah_replay_ordered(html, changes)
+        if value is not None
+    }
+
 
 def _cheetah_rows(html: str, columns: dict[int, str]) -> list[dict[str, str]]:
     """Group cheetah table cells into per-port rows keyed by column name."""
@@ -866,9 +964,7 @@ class NetgearCheetahApi(NetgearBaseUiApi):
     # Its form defines exactly pwd/err_flag/err_msg/submt — no login.x/y.
     _login_extra_fields: ClassVar[dict[str, str]] = {"submt": _SUBMIT}
 
-    # Firmware install is untested on this generation; keep it off until the
-    # dual-image/file pages are mapped and verified against real hardware.
-    supports_firmware_install = False
+    supports_firmware_install = True
 
     async def async_get_info(self) -> SwitchInfo:
         """Return the switch's name, model and firmware version."""
@@ -977,3 +1073,202 @@ class NetgearCheetahApi(NetgearBaseUiApi):
         raise NetgearError(
             "Setting port names is not yet supported on S350-series switches"
         )
+
+    async def async_get_image_status(self) -> DualImageStatus:
+        """Return the dual-image (firmware slot) status."""
+        html = await self._request(_CHEETAH_IMAGE_STATUS_PATH)
+
+        def cell(field: str) -> str:
+            match = re.search(
+                rf'VALUE="([^"]*)"[^<]*</TD>\s*<!--\s*basesysImage_{field}\b', html
+            )
+            return match.group(1).strip() if match else ""
+
+        current = cell("sysActiveImageName").lower()
+        if current not in ("image1", "image2"):
+            raise NetgearError("Could not read the switch's dual-image status")
+        return DualImageStatus(
+            versions={
+                "image1": cell("sysImage1Version"),
+                "image2": cell("sysImage2Version"),
+            },
+            current_active=current,
+            next_active=cell("sysActivatedImageName").lower() or current,
+        )
+
+    async def _async_transfer_in_progress(self) -> bool:
+        """True while the switch is writing an uploaded image to flash."""
+        html = await self._request(_CHEETAH_UPLOAD_PATH)
+        value = _cheetah_field_value(html, _CHEETAH_TRANSFER_FIELD)
+        return value.strip().lower() == _CHEETAH_IN_PROGRESS.lower()
+
+    async def _async_upload_firmware(
+        self,
+        image: bytes,
+        filename: str,
+        slot: str,
+        version: str,
+        progress: Callable[[int], None] | None = None,
+    ) -> None:
+        """Upload an image to `slot` and wait for the switch to flash it.
+
+        The POST returns as soon as the switch has buffered the image — for a
+        26 MB file that is seconds, while the flash itself then runs in the
+        background for tens of minutes. "Transfer In Progress" is the only
+        signal that it is still working, so waiting on the version instead
+        (or giving up after a few minutes) looks like a silent failure.
+        """
+        page = await self._request(_CHEETAH_UPLOAD_PATH)
+        fields = _cheetah_replay_ordered(
+            _cheetah_form(page, "/a1"),
+            {
+                _CHEETAH_FILE_TYPE_FIELD: _CHEETAH_FILE_TYPE_CODE,
+                _CHEETAH_UPLOAD_SLOT_FIELD: slot,
+            },
+        )
+        form = aiohttp.FormData()
+        for name, value in fields:
+            if value is None:  # the file input's place in the form
+                form.add_field(
+                    name,
+                    image,
+                    filename=filename,
+                    content_type="application/octet-stream",
+                )
+            else:
+                form.add_field(name, value)
+
+        url = self._url(f"{_CHEETAH_UPLOAD_PATH}/a1")
+        try:
+            async with self._get_session().post(
+                url,
+                data=form,
+                headers={"Referer": self._url(_CHEETAH_UPLOAD_PATH)},
+                timeout=aiohttp.ClientTimeout(total=_FIRMWARE_UPLOAD_TIMEOUT),
+            ) as resp:
+                resp.raise_for_status()
+                text = await resp.text(encoding=_ENCODING)
+        except (aiohttp.ClientError, TimeoutError) as err:
+            raise NetgearError(f"Firmware upload failed: {err}") from err
+        if _LOGIN_FORM_RE.search(text):
+            raise NetgearAuthError("Session expired during firmware upload")
+        reason = _cheetah_field_value(text, "err_msg").strip()
+        if reason:
+            raise NetgearError(f"Switch rejected the firmware: {reason}")
+
+        _LOGGER.info("%s buffered the image; waiting for it to write flash", self.host)
+        started = False
+        for attempt in range(_CHEETAH_FLASH_POLL_ATTEMPTS):
+            await asyncio.sleep(_CHEETAH_FLASH_POLL_SECONDS)
+            if progress is not None:
+                # 20..60 across the flash window; a real wait, not a spinner,
+                # but the switch reports no byte count to scale by.
+                progress(20 + min(attempt * 40 // _CHEETAH_FLASH_POLL_ATTEMPTS, 39))
+            try:
+                if await self._async_transfer_in_progress():
+                    started = True
+                    continue
+                # Not writing: either finished, or it never began.
+                if (await self.async_get_image_status()).versions.get(slot) == version:
+                    _LOGGER.info("%s finished writing %s", self.host, slot)
+                    return
+                if started:
+                    raise NetgearError(
+                        f"Switch stopped writing flash but {slot} does not hold "
+                        f"{version}"
+                    )
+                if attempt >= _CHEETAH_FLASH_START_GRACE:
+                    raise NetgearError(
+                        "Switch accepted the upload but never started writing "
+                        "flash — it did not take the image"
+                    )
+            except NetgearAuthError:
+                raise
+            except NetgearError:
+                if started:
+                    continue  # busy flashing; its web UI can be unresponsive
+                raise
+        raise NetgearError(
+            "Switch was still writing flash after "
+            f"{_CHEETAH_FLASH_POLL_ATTEMPTS * _CHEETAH_FLASH_POLL_SECONDS // 60} min"
+        )
+
+    async def _async_activate_image(self, slot: str, description: str = "") -> None:
+        """Mark a slot as the image to boot from (next-active)."""
+        html = _cheetah_form(await self._request(_CHEETAH_DUAL_IMAGE_PATH), "/a1")
+        body = _cheetah_replay(
+            html,
+            {
+                _CHEETAH_ACTIVATE_SLOT_FIELD: slot,
+                _CHEETAH_ACTIVATE_FIELD: _CHEETAH_CHECKED,
+            },
+        )
+        resp = await self._request(f"{_CHEETAH_DUAL_IMAGE_PATH}/a1", data=body)
+        reason = _cheetah_field_value(resp, "err_msg").strip()
+        if reason:
+            raise NetgearError(f"Could not activate {slot}: {reason}")
+
+    async def _async_reboot(self) -> None:
+        """Reboot the switch via the Device Reboot form."""
+        try:
+            html = _cheetah_form(await self._request(_CHEETAH_REBOOT_PATH), "/a1")
+            body = _cheetah_replay(
+                html, {_CHEETAH_REBOOT_CONFIRM_FIELD: _CHEETAH_CHECKED}
+            )
+            await self._request(f"{_CHEETAH_REBOOT_PATH}/a1", data=body)
+        except NetgearError:
+            # The switch drops the connection as it goes down: that IS success.
+            _LOGGER.debug("Reboot request did not answer (expected)", exc_info=True)
+        self._logged_in = False
+
+    async def async_install_firmware(
+        self,
+        image: bytes,
+        version: str,
+        filename: str,
+        progress: Callable[[int], None] | None = None,
+    ) -> None:
+        """Install a firmware image: upload, activate, reboot, verify.
+
+        The image goes to the INACTIVE slot, so the running firmware stays
+        flashed as a rollback. The flash takes tens of minutes before the
+        reboot even starts; the caller should stop polling the switch for the
+        duration, since it allows very few concurrent sessions.
+        """
+
+        def report(percent: int) -> None:
+            if progress is not None:
+                progress(percent)
+
+        status = await self.async_get_image_status()
+        target = status.inactive
+        _LOGGER.info(
+            "Uploading firmware %s to %s slot %s (running %s from %s)",
+            version,
+            self.host,
+            target,
+            status.versions.get(status.current_active, "?"),
+            status.current_active,
+        )
+        report(20)
+        await self._async_upload_firmware(image, filename, target, version, progress)
+
+        staged = await self.async_get_image_status()
+        if staged.versions.get(target) != version:
+            raise NetgearError(
+                f"Flash finished but slot {target} reports "
+                f"{staged.versions.get(target) or 'nothing'}, expected {version}"
+            )
+        report(65)
+
+        await self._async_activate_image(target, version)
+        if (await self.async_get_image_status()).next_active != target:
+            raise NetgearError(f"Could not make {target} the boot image")
+        report(70)
+
+        _LOGGER.info("Rebooting %s into %s (%s)", self.host, target, version)
+        await self._async_reboot()
+        report(80)
+        await self._async_wait_for_firmware(version, progress)
+        report(100)
+        _LOGGER.info("%s is now running firmware %s", self.host, version)

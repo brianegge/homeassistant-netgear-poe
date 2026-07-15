@@ -224,6 +224,127 @@ async def test_set_port_name_still_unsupported() -> None:
         await api.async_set_port_name(1, "x")
 
 
-async def test_firmware_install_unsupported() -> None:
-    """Firmware install is off until the file pages are mapped."""
-    assert NetgearCheetahApi.supports_firmware_install is False
+async def test_firmware_install_supported() -> None:
+    """This generation can flash (see async_install_firmware)."""
+    assert NetgearCheetahApi.supports_firmware_install is True
+
+
+IMAGE_STATUS_HTML = """<html><body><table>
+<TD><INPUT TYPE=hidden NAME=v_4_1 VALUE="1.0.0.26">1.0.0.26</TD>
+<!-- basesysImage_sysImage1Version -->
+<TD><INPUT TYPE=hidden NAME=v_4_2 VALUE="1.0.0.44">1.0.0.44</TD>
+<!-- basesysImage_sysImage2Version -->
+<TD><INPUT TYPE=hidden NAME=v_4_3 VALUE="image1">image1</TD>
+<!-- basesysImage_sysActiveImageName -->
+<TD><INPUT TYPE=hidden NAME=v_4_4 VALUE="image1">image1</TD>
+<!-- basesysImage_sysActivatedImageName -->
+</table></body></html>"""
+
+UPLOAD_FORM_HTML = (
+    "<html><body>"
+    "<FORM method=post ENCTYPE='multipart/form-data' "
+    'ACTION="/http_file_download.html/a1">'
+    '<INPUT xid=1_10_1 TYPE=hidden NAME=v_1_10_1 VALUE="Code">'
+    '<INPUT xid=1_2_2 TYPE=hidden NAME=v_1_2_2 VALUE="image1">'
+    '<INPUT xid=1_3_1 TYPE=file NAME=".v_1_3_1_handle" VALUE="">'
+    '<INPUT xid=1_3_2 TYPE=hidden NAME=v_1_3_2 VALUE=" not in progress">'
+    '<INPUT TYPE="hidden" NAME="submit_flag" VALUE="0">'
+    '<INPUT TYPE="hidden" NAME="err_msg" VALUE="">'
+    "</FORM></body></html>"
+)
+
+
+async def test_get_image_status() -> None:
+    """The dual-image page maps to slot versions and active markers."""
+    api = _api({"dualImageStatus": IMAGE_STATUS_HTML})
+    status = await api.async_get_image_status()
+
+    assert status.versions == {"image1": "1.0.0.26", "image2": "1.0.0.44"}
+    assert status.current_active == "image1"
+    assert status.next_active == "image1"
+    assert status.inactive == "image2"
+
+
+async def test_get_image_status_unparseable_raises() -> None:
+    """A page without the table is an error, never a guessed slot."""
+    api = _api({"dualImageStatus": "<html>Access Denied</html>"})
+    with pytest.raises(NetgearError, match="dual-image"):
+        await api.async_get_image_status()
+
+
+TWO_FORM_HTML = (
+    "<html><body>"
+    '<FORM method=post ACTION="/http_file_download.html/a0">'
+    '<INPUT TYPE="hidden" NAME="applet_port" VALUE="">'
+    '<INPUT TYPE="hidden" NAME="applet_slot" VALUE="">'
+    "</FORM>"
+    + UPLOAD_FORM_HTML.replace("<html><body>", "").replace("</body></html>", "")
+    + "</body></html>"
+)
+
+
+def test_cheetah_form_scopes_to_the_target_form() -> None:
+    """Fields from the sibling a0 form must not ride along.
+
+    The switch silently drops a submission carrying a field the target form
+    doesn't define — it answers cleanly and simply never flashes anything.
+    """
+    from custom_components.netgear_poe.api_base_ui import (
+        _cheetah_form,
+        _cheetah_replay,
+    )
+
+    body = _cheetah_replay(_cheetah_form(TWO_FORM_HTML, "/a1"), {})
+    assert "applet_port" not in body
+    assert "applet_slot" not in body
+    assert body["v_1_10_1"] == "Code"  # a1's own field is still there
+
+
+def test_cheetah_form_missing_raises() -> None:
+    """A page without the expected form is an error, not a silent no-op."""
+    from custom_components.netgear_poe.api_base_ui import _cheetah_form
+
+    with pytest.raises(NetgearError, match="Could not find"):
+        _cheetah_form("<html>Access Denied</html>", "/a1")
+
+
+def test_cheetah_replay_keeps_the_file_at_its_form_position() -> None:
+    """The file part must sit where the form declares it, not at the end.
+
+    The switch's multipart parser is positional.
+    """
+    from custom_components.netgear_poe.api_base_ui import (
+        _cheetah_form,
+        _cheetah_replay_ordered,
+    )
+
+    fields = _cheetah_replay_ordered(_cheetah_form(TWO_FORM_HTML, "/a1"), {})
+    names = [n for n, _ in fields]
+    file_at = names.index(".v_1_3_1_handle")
+    # Declared after the image-name field and before the transfer flag.
+    assert names.index("v_1_2_2") < file_at < names.index("v_1_3_2")
+    assert fields[file_at][1] is None  # placeholder for the caller's bytes
+
+
+def test_cheetah_replay_forces_apply_and_applies_changes() -> None:
+    """The replay posts every field, changes the asked-for ones, applies."""
+    from custom_components.netgear_poe.api_base_ui import _cheetah_replay
+
+    body = _cheetah_replay(UPLOAD_FORM_HTML, {"v_1_10_1": "0", "v_1_2_2": "image2"})
+    # File type posts the enum INDEX; posting the label "Code" is rejected.
+    assert body["v_1_10_1"] == "0"
+    # The image-name combo is a string, so the slot name posts as-is.
+    assert body["v_1_2_2"] == "image2"
+    # submit_flag 8 = apply; the form's own 0 only re-renders the page.
+    assert body["submit_flag"] == "8"
+    # Other fields ride along, and the file part is never a form field.
+    assert body["v_1_3_2"] == " not in progress"
+    assert ".v_1_3_1_handle" not in body
+
+
+async def test_transfer_in_progress_reads_the_flag() -> None:
+    """The switch reports flash progress only via this field."""
+    busy = UPLOAD_FORM_HTML.replace('VALUE=" not in progress"', 'VALUE="In progress"')
+    assert await _api({"http_file_download": busy})._async_transfer_in_progress()
+    idle = _api({"http_file_download": UPLOAD_FORM_HTML})
+    assert not await idle._async_transfer_in_progress()

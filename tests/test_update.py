@@ -247,6 +247,81 @@ async def test_update_entity_installs(
     assert state.attributes["in_progress"] is False
 
 
+async def test_install_suspends_polling_and_resumes(
+    hass: HomeAssistant,
+    mock_api: MagicMock,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """Polling stops for the install and comes back afterwards.
+
+    These switches allow as few as four web sessions and take tens of minutes
+    to write flash, so a 30 s poll would fight the upgrade for a session slot.
+    """
+    seen: list[object] = []
+
+    async def record_interval(*args: object, **kwargs: object) -> None:
+        # Captured while the install is running.
+        seen.append(mock_config_entry.runtime_data.coordinator.update_interval)
+
+    mock_api.supports_firmware_install = True
+    mock_api.async_install_firmware = AsyncMock(side_effect=record_interval)
+
+    with (
+        patch.dict(
+            "custom_components.netgear_poe.const.LATEST_FIRMWARE",
+            {MOCK_MODEL: NEW_RELEASE},
+            clear=False,
+        ),
+        patch(
+            "custom_components.netgear_poe.update.async_get_clientsession",
+            return_value=_download_session(_zip_with_stk(b"IMAGE")),
+        ),
+    ):
+        await setup_integration(hass, mock_config_entry)
+        coordinator = mock_config_entry.runtime_data.coordinator
+        before = coordinator.update_interval
+        assert before is not None
+
+        await hass.services.async_call(
+            "update", "install", {"entity_id": UPDATE_ENTITY}, blocking=True
+        )
+
+    assert seen == [None], "polling was still scheduled during the install"
+    assert coordinator.update_interval == before, "polling was not resumed"
+
+
+async def test_install_resumes_polling_after_failure(
+    hass: HomeAssistant,
+    mock_api: MagicMock,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """A failed install must not leave the switch unpolled forever."""
+    mock_api.supports_firmware_install = True
+    mock_api.async_install_firmware = AsyncMock(side_effect=NetgearError("boom"))
+
+    with (
+        patch.dict(
+            "custom_components.netgear_poe.const.LATEST_FIRMWARE",
+            {MOCK_MODEL: NEW_RELEASE},
+            clear=False,
+        ),
+        patch(
+            "custom_components.netgear_poe.update.async_get_clientsession",
+            return_value=_download_session(_zip_with_stk(b"IMAGE")),
+        ),
+    ):
+        await setup_integration(hass, mock_config_entry)
+        coordinator = mock_config_entry.runtime_data.coordinator
+        before = coordinator.update_interval
+
+        with pytest.raises(HomeAssistantError):
+            await hass.services.async_call(
+                "update", "install", {"entity_id": UPDATE_ENTITY}, blocking=True
+            )
+
+    assert coordinator.update_interval == before
+
+
 async def test_update_entity_install_failure_surfaces(
     hass: HomeAssistant,
     mock_api: MagicMock,
