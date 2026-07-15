@@ -23,8 +23,8 @@ GS110TP_OID = "1.3.6.1.4.1.4526.100.4.19"
 
 NEW_RELEASE = FirmwareRelease(
     version="9.9.9.9",
-    url="http://downloads.example.com/fw_V9.9.9.9.zip",
-    notes_url="http://kb.example.com/9999",
+    url="https://downloads.example.com/fw_V9.9.9.9.zip",
+    notes_url="https://kb.example.com/9999",
 )
 
 
@@ -95,14 +95,14 @@ def test_resolve_falls_back_to_model_key() -> None:
 
 def test_extract_image_from_zip() -> None:
     """The .stk inside Netgear's zip is picked over the release notes."""
-    filename, image = _extract_image(_zip_with_stk(b"IMAGE"), "http://x/fw.zip")
+    filename, image = _extract_image(_zip_with_stk(b"IMAGE"), "https://x/fw.zip")
     assert filename == "fw_V9.9.9.9.stk"
     assert image == b"IMAGE"
 
 
 def test_extract_image_passes_through_raw_stk() -> None:
     """A download that is not a zip is assumed to be the image itself."""
-    filename, image = _extract_image(b"raw-stk-bytes", "http://x/fw_V1.stk")
+    filename, image = _extract_image(b"raw-stk-bytes", "https://x/fw_V1.stk")
     assert filename == "fw_V1.stk"
     assert image == b"raw-stk-bytes"
 
@@ -112,8 +112,9 @@ def test_extract_image_rejects_zip_without_stk() -> None:
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
         archive.writestr("notes.html", "x")
+    blob = buffer.getvalue()
     with pytest.raises(HomeAssistantError, match=r"No \.stk"):
-        _extract_image(buffer.getvalue(), "http://x/fw.zip")
+        _extract_image(blob, "https://x/fw.zip")
 
 
 async def test_update_entity_up_to_date(

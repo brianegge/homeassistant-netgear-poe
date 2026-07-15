@@ -590,7 +590,8 @@ async def test_install_firmware_stops_when_activation_did_not_stick() -> None:
         side_effect=[
             _image_status("5.4.2.30", "5.4.2.33", active="image2"),
             _image_status("5.4.2.35", "5.4.2.33", active="image2"),
-            _image_status("5.4.2.35", "5.4.2.33", active="image2"),  # nxt=image2
+            # next-active never moved off image2: activation did not stick.
+            _image_status("5.4.2.35", "5.4.2.33", active="image2"),
         ]
     )
     api._async_upload_firmware = AsyncMock()

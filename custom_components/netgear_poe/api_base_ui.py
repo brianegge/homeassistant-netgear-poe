@@ -56,6 +56,8 @@ _LOGIN_FORM_RE = re.compile(r'name="pwd"', re.I)
 
 # The value the UI's JS writes into the hidden "submt" field (0x10).
 _SUBMIT = "16"
+# Shown when the switch sets err_flag=1 without giving an err_msg.
+_UNKNOWN_ERROR = "unknown error"
 _POWER_CYCLE_OFF_SECONDS = 3
 
 # Firmware lives in two flash slots ("dual image"); the switch boots whichever
@@ -461,7 +463,7 @@ class NetgearBaseUiApi:
         }
         html = await self._request(path, data=body)
         if _input_value(html, "err_flag") == "1":
-            reason = _input_value(html, "err_msg") or "unknown error"
+            reason = _input_value(html, "err_msg") or _UNKNOWN_ERROR
             raise NetgearError(f"Switch rejected the change: {reason}")
 
     async def async_set_port_enabled(self, port: int, enabled: bool) -> None:
@@ -566,7 +568,7 @@ class NetgearBaseUiApi:
         if _LOGIN_FORM_RE.search(text):
             raise NetgearAuthError("Session expired during firmware upload")
         if _input_value(text, "err_flag") == "1":
-            reason = _input_value(text, "err_msg") or "unknown error"
+            reason = _input_value(text, "err_msg") or _UNKNOWN_ERROR
             raise NetgearError(f"Switch rejected the firmware: {reason}")
         status = _input_value(text, "download_status")
         if "success" not in status.lower():
@@ -598,7 +600,7 @@ class NetgearBaseUiApi:
             },
         )
         if _input_value(html, "err_flag") == "1":
-            reason = _input_value(html, "err_msg") or "unknown error"
+            reason = _input_value(html, "err_msg") or _UNKNOWN_ERROR
             raise NetgearError(f"Could not activate {slot}: {reason}")
 
     async def _async_reboot(self) -> None:
