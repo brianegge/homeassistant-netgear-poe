@@ -16,6 +16,11 @@ browser would:
   form, "None" on the port-config form.
 * An expired session serves the login page in place of the requested page,
   which is how re-login is triggered.
+* Firmware: two flash slots ("dual image", system/image_status.html). An
+  upgrade is a multipart upload to the inactive slot (system/
+  http_file_download.html), activation (system/dual_image_cfg.html) and a
+  reboot (system/sys_reset.html — NOT reset_cfg.html, which is the
+  factory-default form).
 
 Tables are parsed by column *header* rather than by fixed offsets, since a
 port with no description renders an empty cell and firmware revisions move
@@ -27,6 +32,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from collections.abc import Callable
+from dataclasses import dataclass
 from html import unescape
 
 import aiohttp
@@ -50,6 +57,22 @@ _LOGIN_FORM_RE = re.compile(r'name="pwd"', re.I)
 # The value the UI's JS writes into the hidden "submt" field (0x10).
 _SUBMIT = "16"
 _POWER_CYCLE_OFF_SECONDS = 3
+
+# Firmware lives in two flash slots ("dual image"); the switch boots whichever
+# is marked next-active. An upgrade goes to the inactive slot so the running
+# image survives as a rollback.
+_IMAGE_STATUS_PATH = "/base/system/image_status.html"
+_DUAL_IMAGE_PATH = "/base/system/dual_image_cfg.html"
+_FIRMWARE_UPLOAD_PATH = "/base/system/http_file_download.html"
+# "Device Reboot". NOT /base/system/reset_cfg.html — that near-identical form
+# is "Factory Default" and wipes the switch's configuration.
+_REBOOT_PATH = "/base/system/sys_reset.html"
+
+# The switch writes flash while the upload POST is in flight.
+_FIRMWARE_UPLOAD_TIMEOUT = 600
+# A reboot takes ~45 s end to end; poll well past that before giving up.
+_REBOOT_POLL_SECONDS = 5
+_REBOOT_POLL_ATTEMPTS = 60
 # The pages declare iso-8859-1 in a meta tag but send no charset header.
 # Decoding explicitly keeps it deterministic (and can never raise) instead of
 # leaving aiohttp to sniff the encoding of every poll's response.
@@ -162,8 +185,56 @@ def _parse_port_names(html: str) -> dict[int, str] | None:
     return names
 
 
+@dataclass
+class DualImageStatus:
+    """What each firmware slot holds and which one the switch is running."""
+
+    versions: dict[str, str]  # {"image1": "5.4.2.35", "image2": "5.4.2.33"}
+    current_active: str  # the slot the switch booted from
+    next_active: str  # the slot it will boot next
+
+    @property
+    def inactive(self) -> str:
+        """The slot that is safe to overwrite."""
+        return "image2" if self.current_active == "image1" else "image1"
+
+
+def _parse_image_status(html: str) -> DualImageStatus:
+    """Parse the Dual Image Status table."""
+    row = _row_under_header(_rows(html), "Unit")
+    current = row.get("Current-active", "").lower()
+    if current not in ("image1", "image2"):
+        raise NetgearError("Could not read the switch's dual-image status")
+    return DualImageStatus(
+        versions={
+            "image1": row.get("Image1 Ver", ""),
+            "image2": row.get("Image2 Ver", ""),
+        },
+        current_active=current,
+        next_active=row.get("Next-active", "").lower(),
+    )
+
+
+def _image_description(html: str, slot: str) -> str:
+    """Return a slot's description from the image-status page.
+
+    Rendered as a one-cell label row ("Image1 Description") with the value in
+    the row beneath it.
+    """
+    rows = _rows(html)
+    label = f"{slot.capitalize()} Description"
+    for index, cells in enumerate(rows[:-1]):
+        if label in cells:
+            below = rows[index + 1]
+            return below[0] if below else ""
+    return ""
+
+
 class NetgearBaseUiApi:
     """Async PoE client for the classic /base/ web UI. Mirrors NetgearPoeApi."""
+
+    # This backend can flash firmware (see async_install_firmware).
+    supports_firmware_install = True
 
     def __init__(
         self,
@@ -449,6 +520,191 @@ class NetgearBaseUiApi:
                     if attempt == 2:
                         raise
                     await asyncio.sleep(1)
+
+    async def async_get_image_status(self) -> DualImageStatus:
+        """Return the dual-image (firmware slot) status."""
+        return _parse_image_status(await self._request(_IMAGE_STATUS_PATH))
+
+    async def _async_upload_firmware(
+        self, slot: str, image: bytes, filename: str
+    ) -> None:
+        """Upload a firmware image to a slot via the HTTP File Download form.
+
+        Posted directly rather than through _request: the body is multipart
+        (a browser file upload), and the switch flashes the image while the
+        POST is in flight, so it needs its own generous timeout.
+        """
+        form = aiohttp.FormData()
+        # Field order mirrors the form; a field it doesn't define answers 400.
+        form.add_field("file_type", "code")
+        form.add_field("localfilename", slot)
+        form.add_field(
+            ".filename_handle",
+            image,
+            filename=filename,
+            content_type="application/octet-stream",
+        )
+        form.add_field("download_status", "")
+        form.add_field("submt", _SUBMIT)
+        form.add_field("cncel", "")
+        form.add_field("err_flag", "0")
+        form.add_field("err_msg", "")
+
+        url = self._url(_FIRMWARE_UPLOAD_PATH)
+        try:
+            async with self._get_session().post(
+                url,
+                data=form,
+                headers={"Referer": url},
+                timeout=aiohttp.ClientTimeout(total=_FIRMWARE_UPLOAD_TIMEOUT),
+            ) as resp:
+                resp.raise_for_status()
+                text = await resp.text(encoding=_ENCODING)
+        except (aiohttp.ClientError, TimeoutError) as err:
+            raise NetgearError(f"Firmware upload failed: {err}") from err
+
+        if _LOGIN_FORM_RE.search(text):
+            raise NetgearAuthError("Session expired during firmware upload")
+        if _input_value(text, "err_flag") == "1":
+            reason = _input_value(text, "err_msg") or "unknown error"
+            raise NetgearError(f"Switch rejected the firmware: {reason}")
+        status = _input_value(text, "download_status")
+        if "success" not in status.lower():
+            raise NetgearError(
+                f"Firmware upload did not complete: {status or 'no status reported'}"
+            )
+
+    async def _async_activate_image(self, slot: str) -> None:
+        """Mark a slot as the image to boot from (next-active)."""
+        # The form echoes the slot's description back; read the current one so
+        # the post can't clobber it (update_flag=0 leaves it alone anyway).
+        status_html = await self._request(_IMAGE_STATUS_PATH)
+        html = await self._request(
+            _DUAL_IMAGE_PATH,
+            data={
+                "image_name": slot.capitalize(),  # option values: Image1/Image2
+                "current_active": _parse_image_status(status_html).current_active,
+                "image_descrip": _image_description(status_html, slot),
+                "act_img": "checkbox",
+                "delete": "",
+                "refrsh": "",
+                "clear": "",
+                "submt": _SUBMIT,
+                "activate_flag": "1",
+                "update_flag": "0",
+                "err_flag": "0",
+                "err_msg": "",
+                "delete_flag": "0",
+            },
+        )
+        if _input_value(html, "err_flag") == "1":
+            reason = _input_value(html, "err_msg") or "unknown error"
+            raise NetgearError(f"Could not activate {slot}: {reason}")
+
+    async def _async_reboot(self) -> None:
+        """Reboot the switch via the Device Reboot form.
+
+        The switch usually drops the connection as it goes down, so a
+        connection error here means the reboot took, not that it failed.
+        """
+        url = self._url(_REBOOT_PATH)
+        try:
+            async with self._get_session().post(
+                url,
+                data={"CBox_2": "0", "submt": _SUBMIT, "cncel": ""},
+                headers={"Referer": url},
+                timeout=aiohttp.ClientTimeout(total=20),
+            ) as resp:
+                await resp.read()
+        except (aiohttp.ClientError, TimeoutError):
+            pass
+        self._logged_in = False
+
+    async def _async_wait_for_firmware(
+        self, version: str, progress: Callable[[int], None] | None = None
+    ) -> None:
+        """Poll until the rebooted switch reports `version`.
+
+        Early polls may still reach the old firmware (the switch keeps
+        answering for a few seconds before it actually goes down), so a
+        mismatch keeps waiting; only the deadline decides. Progress walks
+        80 -> 95 as the retry budget is spent — each poll is a real step,
+        so the bar reports measurement, not animation.
+        """
+        observed = ""
+        for attempt in range(1, _REBOOT_POLL_ATTEMPTS + 1):
+            await asyncio.sleep(_REBOOT_POLL_SECONDS)
+            if progress is not None:
+                progress(80 + (attempt * 15) // _REBOOT_POLL_ATTEMPTS)
+            try:
+                observed = (await self.async_get_info()).firmware
+            except NetgearError:
+                continue
+            if observed == version:
+                return
+        raise NetgearError(
+            f"Switch did not come back on firmware {version} within "
+            f"{_REBOOT_POLL_ATTEMPTS * _REBOOT_POLL_SECONDS} s"
+            + (f" (last reported {observed})" if observed else "")
+        )
+
+    async def async_install_firmware(
+        self,
+        image: bytes,
+        version: str,
+        filename: str,
+        progress: Callable[[int], None] | None = None,
+    ) -> None:
+        """Install a firmware image: upload, activate, reboot, verify.
+
+        The image always goes to the INACTIVE slot, so the running firmware
+        stays flashed as a rollback (activate the other slot and reboot to
+        revert). The final reboot drops PoE — and the switch's own link —
+        for around a minute. `version` must match what the image reports
+        after flashing; it is how the upload and the reboot are verified.
+        """
+
+        def report(percent: int) -> None:
+            if progress is not None:
+                progress(percent)
+
+        status = await self.async_get_image_status()
+        target = status.inactive
+        _LOGGER.info(
+            "Uploading firmware %s to %s slot %s (running %s from %s)",
+            version,
+            self.host,
+            target,
+            status.versions.get(status.current_active, "?"),
+            status.current_active,
+        )
+        report(20)
+        await self._async_upload_firmware(target, image, filename)
+
+        staged = await self.async_get_image_status()
+        if staged.versions.get(target) != version:
+            raise NetgearError(
+                f"Upload finished but slot {target} reports "
+                f"{staged.versions.get(target) or 'nothing'}, expected {version}"
+            )
+        report(60)
+
+        await self._async_activate_image(target)
+        if (await self.async_get_image_status()).next_active != target:
+            raise NetgearError(f"Could not make {target} the boot image")
+        report(70)
+
+        _LOGGER.info(
+            "Rebooting %s into %s (%s); PoE will drop briefly",
+            self.host,
+            target,
+            version,
+        )
+        await self._async_reboot()
+        report(80)
+        await self._async_wait_for_firmware(version, progress)
+        report(100)
+        _LOGGER.info("%s is now running firmware %s", self.host, version)
 
     async def async_ensure_trap_destination(self, dest_ip: str, community: str) -> None:
         """Trap registration is not implemented for this UI."""

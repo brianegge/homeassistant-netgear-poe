@@ -27,7 +27,7 @@ homeassistant-netgear-poe/
 │       ├── button.py            # Per-port power-cycle buttons
 │       ├── sensor.py            # Total PoE power sensor
 │       ├── binary_sensor.py     # Per-port link sensors (SNMP)
-│       ├── update.py            # Firmware version / update-available entity
+│       ├── update.py            # Firmware update entity (and install, /base/ UI)
 │       ├── diagnostics.py       # Config-entry diagnostics
 │       ├── manifest.json        # Metadata (requirements: pysnmp)
 │       ├── strings.json         # UI localization
@@ -68,6 +68,13 @@ JSON generation. Only the probe is authoritative.
   see the module docstring in `api_base_ui.py`. The switch answers `400` if a
   posted body carries a field that page's form doesn't define, so each form
   sends exactly its own field set.
+- **Firmware install (/base/ UI only)** — `LATEST_FIRMWARE` in `const.py` maps
+  sysObjectID → `FirmwareRelease` (version + Netgear download URL + KB link).
+  `async_install_firmware` uploads the `.stk` to the **inactive** dual-image
+  slot (the running firmware stays as a rollback), activates it and reboots
+  via `system/sys_reset.html`. Never post `system/reset_cfg.html` — that
+  near-identical form is "Factory Default" and wipes the config. The reboot
+  drops PoE and the switch's uplink for ~1 minute.
 - **Link state / port names** — SNMP v2c: `ifOperStatus` (link) and `ifAlias`
   (names, same source as LibreNMS). Preferred over the web CGI for names.
 - **Instant events** — SNMP trap receiver on UDP 162 (`linkUp`/`linkDown`).

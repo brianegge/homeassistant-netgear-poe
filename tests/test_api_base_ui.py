@@ -12,8 +12,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import aiohttp
 import pytest
 
-from custom_components.netgear_poe.api import NetgearAuthError, NetgearError
-from custom_components.netgear_poe.api_base_ui import NetgearBaseUiApi
+from custom_components.netgear_poe.api import (
+    NetgearAuthError,
+    NetgearError,
+    SwitchInfo,
+)
+from custom_components.netgear_poe.api_base_ui import (
+    _REBOOT_POLL_ATTEMPTS,
+    DualImageStatus,
+    NetgearBaseUiApi,
+)
 
 
 def _cells(*values: str) -> str:
@@ -473,3 +481,266 @@ async def test_request_gives_up_after_relogin() -> None:
 
     with pytest.raises(NetgearAuthError, match="Session rejected"):
         await api._request("/base/poe/poe_port_cfg.html")
+
+
+# Firmware slots as on the real page: header row with a leading spacer cell,
+# and each slot's description as a label row with the value in the row below.
+IMAGE_STATUS_HTML = """<html><body>
+<FORM method="post" ACTION="/base/system/image_status.html">
+<TABLE>
+<TR><TD>&nbsp;</TD><TD>Unit</TD><TD>Image1 Ver</TD><TD>Image2 Ver</TD>
+<TD>Current-active</TD><TD>Next-active</TD></TR>
+<TR><TD>1</TD><TD>5.4.2.30</TD><TD>5.4.2.33</TD><TD>image2</TD><TD>image2</TD></TR>
+<TR><TD>&nbsp;</TD></TR>
+<TR><TD>Image1 Description</TD></TR>
+<TR><TD>default image</TD></TR>
+<TR><TD>&nbsp;</TD></TR>
+<TR><TD>Image2 Description</TD></TR>
+<TR><TD>5-4-2-33</TD></TR>
+</TABLE>
+<INPUT TYPE="hidden" NAME="err_flag" VALUE="">
+<INPUT TYPE="hidden" NAME="err_msg" VALUE="">
+</FORM></body></html>"""
+
+DUAL_IMAGE_OK_HTML = """<html><body>
+<FORM method="post" ACTION="/base/system/dual_image_cfg.html">
+<INPUT TYPE="hidden" NAME="err_flag" VALUE="0">
+<INPUT TYPE="hidden" NAME="err_msg" VALUE="">
+</FORM></body></html>"""
+
+
+def _image_status(
+    image1: str, image2: str, active: str, nxt: str | None = None
+) -> DualImageStatus:
+    return DualImageStatus(
+        versions={"image1": image1, "image2": image2},
+        current_active=active,
+        next_active=nxt or active,
+    )
+
+
+async def test_get_image_status() -> None:
+    """The dual-image table maps to slot versions and active markers."""
+    api = _api({"image_status": IMAGE_STATUS_HTML})
+    status = await api.async_get_image_status()
+
+    assert status.versions == {"image1": "5.4.2.30", "image2": "5.4.2.33"}
+    assert status.current_active == "image2"
+    assert status.next_active == "image2"
+    assert status.inactive == "image1"
+
+
+async def test_get_image_status_unparseable_raises() -> None:
+    """A page without the table is an error, never a guessed slot."""
+    api = _api({"image_status": "<html><body>Access Denied</body></html>"})
+    with pytest.raises(NetgearError, match="dual-image"):
+        await api.async_get_image_status()
+
+
+async def test_install_firmware_targets_inactive_slot() -> None:
+    """The image lands in the slot the switch is NOT running from."""
+    api = NetgearBaseUiApi("host", "pw")
+    api.async_get_image_status = AsyncMock(
+        side_effect=[
+            _image_status("5.4.2.30", "5.4.2.33", active="image2"),
+            _image_status("5.4.2.35", "5.4.2.33", active="image2"),
+            _image_status("5.4.2.35", "5.4.2.33", active="image2", nxt="image1"),
+        ]
+    )
+    api._async_upload_firmware = AsyncMock()
+    api._async_activate_image = AsyncMock()
+    api._async_reboot = AsyncMock()
+    api._async_wait_for_firmware = AsyncMock()
+    progress: list[int] = []
+
+    await api.async_install_firmware(
+        b"stk-bytes", "5.4.2.35", filename="fw.stk", progress=progress.append
+    )
+
+    api._async_upload_firmware.assert_awaited_once_with(
+        "image1", b"stk-bytes", "fw.stk"
+    )
+    api._async_activate_image.assert_awaited_once_with("image1")
+    api._async_reboot.assert_awaited_once()
+    api._async_wait_for_firmware.assert_awaited_once_with("5.4.2.35", progress.append)
+    assert progress == sorted(progress)
+    assert progress[-1] == 100
+
+
+async def test_install_firmware_stops_when_upload_not_recorded() -> None:
+    """A slot still holding the old version means no activate and no reboot."""
+    api = NetgearBaseUiApi("host", "pw")
+    unchanged = _image_status("5.4.2.30", "5.4.2.33", active="image2")
+    api.async_get_image_status = AsyncMock(side_effect=[unchanged, unchanged])
+    api._async_upload_firmware = AsyncMock()
+    api._async_activate_image = AsyncMock()
+    api._async_reboot = AsyncMock()
+
+    with pytest.raises(NetgearError, match=r"reports 5\.4\.2\.30"):
+        await api.async_install_firmware(b"stk", "5.4.2.35", filename="fw.stk")
+
+    api._async_activate_image.assert_not_awaited()
+    api._async_reboot.assert_not_awaited()
+
+
+async def test_install_firmware_stops_when_activation_did_not_stick() -> None:
+    """next-active must move to the target slot before any reboot."""
+    api = NetgearBaseUiApi("host", "pw")
+    api.async_get_image_status = AsyncMock(
+        side_effect=[
+            _image_status("5.4.2.30", "5.4.2.33", active="image2"),
+            _image_status("5.4.2.35", "5.4.2.33", active="image2"),
+            _image_status("5.4.2.35", "5.4.2.33", active="image2"),  # nxt=image2
+        ]
+    )
+    api._async_upload_firmware = AsyncMock()
+    api._async_activate_image = AsyncMock()
+    api._async_reboot = AsyncMock()
+
+    with pytest.raises(NetgearError, match="boot image"):
+        await api.async_install_firmware(b"stk", "5.4.2.35", filename="fw.stk")
+
+    api._async_reboot.assert_not_awaited()
+
+
+async def test_activate_image_posts_only_that_forms_fields() -> None:
+    """Activation posts the dual-image form, preserving the description."""
+    api = _api(
+        {"image_status": IMAGE_STATUS_HTML, "dual_image_cfg": DUAL_IMAGE_OK_HTML}
+    )
+    await api._async_activate_image("image1")
+
+    path = api._request.await_args.args[0]
+    body = api._request.await_args.kwargs["data"]
+    assert path == "/base/system/dual_image_cfg.html"
+    assert body["image_name"] == "Image1"
+    assert body["act_img"] == "checkbox"
+    assert body["activate_flag"] == "1"
+    assert body["update_flag"] == "0"
+    assert body["delete_flag"] == "0"
+    assert body["current_active"] == "image2"
+    # The slot's existing description is echoed back, not overwritten.
+    assert body["image_descrip"] == "default image"
+    # This is not a per-port form; those fields would make the switch 400.
+    assert "selectedPorts" not in body
+
+
+async def test_upload_firmware_posts_multipart_to_upload_form() -> None:
+    """The upload posts the HTTP File Download form and checks its status."""
+    ok = (
+        '<html><body><INPUT TYPE="hidden" NAME="err_flag" VALUE="0">'
+        '<INPUT name="download_status" VALUE="File transfer operation '
+        'completed successfully."></body></html>'
+    )
+    session = _login_session(True)
+    session.post.return_value.__aenter__.return_value.text = AsyncMock(return_value=ok)
+    api = NetgearBaseUiApi("host", "pw", session=session)
+
+    await api._async_upload_firmware("image1", b"stk-bytes", "fw.stk")
+
+    url = session.post.call_args.args[0]
+    assert url.endswith("/base/system/http_file_download.html")
+    form = session.post.call_args.kwargs["data"]
+    names = [options["name"] for options, _headers, _value in form._fields]
+    # Exactly the form's own fields, in form order — anything else answers 400.
+    assert names == [
+        "file_type",
+        "localfilename",
+        ".filename_handle",
+        "download_status",
+        "submt",
+        "cncel",
+        "err_flag",
+        "err_msg",
+    ]
+    values = {options["name"]: value for options, _headers, value in form._fields}
+    assert values["file_type"] == "code"
+    assert values["localfilename"] == "image1"
+    assert values[".filename_handle"] == b"stk-bytes"
+
+
+async def test_upload_firmware_requires_success_status() -> None:
+    """err_flag=0 alone is not enough; the status text must confirm."""
+    stalled = (
+        '<html><body><INPUT TYPE="hidden" NAME="err_flag" VALUE="0">'
+        '<INPUT name="download_status" VALUE=""></body></html>'
+    )
+    session = _login_session(True)
+    session.post.return_value.__aenter__.return_value.text = AsyncMock(
+        return_value=stalled
+    )
+    api = NetgearBaseUiApi("host", "pw", session=session)
+
+    with pytest.raises(NetgearError, match="did not complete"):
+        await api._async_upload_firmware("image1", b"stk", "fw.stk")
+
+
+async def test_reboot_posts_device_reboot_not_factory_default() -> None:
+    """The reboot hits sys_reset.html; reset_cfg.html would wipe the config."""
+    session = _login_session(True)
+    session.post.return_value.__aenter__.return_value.read = AsyncMock(return_value=b"")
+    api = NetgearBaseUiApi("host", "pw", session=session)
+    api._logged_in = True
+
+    await api._async_reboot()
+
+    url = session.post.call_args.args[0]
+    assert url.endswith("/base/system/sys_reset.html")
+    assert "reset_cfg" not in url
+    assert session.post.call_args.kwargs["data"] == {
+        "CBox_2": "0",
+        "submt": "16",
+        "cncel": "",
+    }
+    assert api._logged_in is False
+
+
+async def test_reboot_swallows_the_connection_drop() -> None:
+    """The switch drops the connection as it goes down; that is success."""
+    session = _login_session(True)
+    session.post.return_value.__aenter__ = AsyncMock(
+        side_effect=aiohttp.ClientConnectionError("dropped")
+    )
+    api = NetgearBaseUiApi("host", "pw", session=session)
+
+    await api._async_reboot()  # must not raise
+
+
+async def test_wait_for_firmware_rides_out_reboot() -> None:
+    """Down, then the old version, then the new one — only then success."""
+    api = NetgearBaseUiApi("host", "pw")
+    api.async_get_info = AsyncMock(
+        side_effect=[
+            SwitchInfo(name="s", model="m", firmware="5.4.2.33"),  # pre-reboot
+            NetgearError("down"),
+            NetgearError("down"),
+            SwitchInfo(name="s", model="m", firmware="5.4.2.35"),
+        ]
+    )
+    progress: list[int] = []
+    with patch(
+        "custom_components.netgear_poe.api_base_ui.asyncio.sleep", new=AsyncMock()
+    ):
+        await api._async_wait_for_firmware("5.4.2.35", progress.append)
+
+    assert api.async_get_info.await_count == 4
+    # Each poll walks the bar within the reboot band, never past it.
+    assert progress == sorted(progress)
+    assert all(80 <= percent <= 95 for percent in progress)
+
+
+async def test_wait_for_firmware_times_out_with_last_seen() -> None:
+    """Booting the wrong image surfaces what the switch actually reports."""
+    api = NetgearBaseUiApi("host", "pw")
+    api.async_get_info = AsyncMock(
+        return_value=SwitchInfo(name="s", model="m", firmware="5.4.2.33")
+    )
+    with (
+        patch(
+            "custom_components.netgear_poe.api_base_ui.asyncio.sleep", new=AsyncMock()
+        ),
+        pytest.raises(NetgearError, match=r"last reported 5\.4\.2\.33"),
+    ):
+        await api._async_wait_for_firmware("5.4.2.35")
+
+    assert api.async_get_info.await_count == _REBOOT_POLL_ATTEMPTS

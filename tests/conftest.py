@@ -120,6 +120,9 @@ def mock_api(
     """
     api = MagicMock()
     api.host = MOCK_HOST
+    # MagicMock would answer truthy for any attribute; the default fixture
+    # models the JSON CGI backend, which cannot flash firmware.
+    api.supports_firmware_install = False
     api.async_get_info = AsyncMock(
         return_value=SwitchInfo(
             name=MOCK_SYS_NAME, model=MOCK_MODEL, firmware=MOCK_FIRMWARE

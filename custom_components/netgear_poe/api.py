@@ -107,6 +107,9 @@ class PoeData:
 class NetgearPoeApi:
     """Async client for PoE control over the switch's web API."""
 
+    # No firmware-install path is implemented for this backend (yet).
+    supports_firmware_install = False
+
     def __init__(
         self,
         host: str,

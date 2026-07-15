@@ -42,7 +42,22 @@ trap receiver on UDP 162 and registers this host as a trap destination on
 the switch, so `linkUp`/`linkDown` events update the link sensors
 instantly (the poll remains a backstop for dropped UDP traps).
 
-Plus one **PoE power** sensor with the switch's total PoE draw in watts.
+Plus one **PoE power** sensor with the switch's total PoE draw in watts,
+and a **Firmware** update entity. The latest known firmware per model is
+bundled with the integration (version, download link and release notes).
+On classic HTML models the entity can also **install** the update: it
+downloads the image from Netgear, flashes it to the switch's inactive
+firmware slot (the running version stays in the other slot as a rollback),
+and reboots. The reboot cuts PoE — every powered camera and AP — and the
+switch's own uplink for about a minute, so trigger it at a quiet moment.
+
+An install takes 5–10 minutes, and the progress bar only moves when the
+switch reports something. In particular it sits at **20 % for several
+minutes** while the switch writes the image to flash — the switch gives no
+feedback during the write (its own web UI just says to wait), so a stalled
+bar there is normal, not a hang. After activation it creeps from 80 % to
+95 % while the switch reboots, then jumps to 100 % once the new version is
+confirmed running.
 
 ## Actions
 

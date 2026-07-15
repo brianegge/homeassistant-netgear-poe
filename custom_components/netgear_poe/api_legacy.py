@@ -76,6 +76,9 @@ def _parse_xml(text: str) -> ET.Element:
 class NetgearLegacyApi:
     """Async PoE client for the legacy xui web UI. Mirrors NetgearPoeApi."""
 
+    # No firmware-install path is implemented for this backend (yet).
+    supports_firmware_install = False
+
     def __init__(
         self,
         host: str,
