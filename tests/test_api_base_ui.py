@@ -430,6 +430,60 @@ async def test_power_cycle_retries_restore() -> None:
     assert calls == [False, True, True]
 
 
+STATUS_HTML = (
+    '<html><body><FORM METHOD="POST" ACTION="/base/status.html">'
+    '<INPUT TYPE="hidden" NAME="sessionID" VALUE="TOK123">'
+    "</FORM></body></html>"
+)
+
+
+async def test_logout_posts_session_token_and_frees_the_slot() -> None:
+    """Logout GETs the token then POSTs it back, freeing the session slot.
+
+    These switches allow as few as four sessions with a long idle timeout,
+    so a leaked session locks the UI out; async_close must log out.
+    """
+    api = NetgearBaseUiApi("host", "pw")
+    api._logged_in = True
+    api._attempt_request = AsyncMock(side_effect=[STATUS_HTML, None])
+
+    await api.async_logout()
+
+    calls = api._attempt_request.await_args_list
+    assert calls[0].args[0] == "/base/status.html"
+    assert calls[0].args[1] is None  # GET for the token
+    assert calls[1].args[0] == "/base/status.html"
+    assert calls[1].args[1] == {"sessionID": "TOK123"}  # POST to log out
+    assert api._logged_in is False
+
+
+async def test_logout_is_a_noop_when_not_logged_in() -> None:
+    """Nothing is posted if there is no session to end."""
+    api = NetgearBaseUiApi("host", "pw")
+    api._attempt_request = AsyncMock()
+    await api.async_logout()
+    api._attempt_request.assert_not_called()
+
+
+async def test_logout_tolerates_a_failed_request() -> None:
+    """A logout that errors still clears local state (slot idles out)."""
+    api = NetgearBaseUiApi("host", "pw")
+    api._logged_in = True
+    api._attempt_request = AsyncMock(side_effect=NetgearError("boom"))
+
+    await api.async_logout()  # must not raise
+    assert api._logged_in is False
+
+
+async def test_close_logs_out() -> None:
+    """async_close ends the session before dropping it."""
+    api = NetgearBaseUiApi("host", "pw")
+    api._logged_in = True
+    api.async_logout = AsyncMock()
+    await api.async_close()
+    api.async_logout.assert_awaited_once()
+
+
 async def test_trap_registration_unsupported() -> None:
     """This UI has no trap registration; it must fail loudly, not silently."""
     api = NetgearBaseUiApi("host", "pw")

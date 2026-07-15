@@ -70,6 +70,9 @@ _FIRMWARE_UPLOAD_PATH = "/base/system/http_file_download.html"
 # "Device Reboot". NOT /base/system/reset_cfg.html — that near-identical form
 # is "Factory Default" and wipes the switch's configuration.
 _REBOOT_PATH = "/base/system/sys_reset.html"
+# Logout: POST the session token here, as the UI's logout button does. Shared
+# by the classic and cheetah UIs; frees the session slot immediately.
+_LOGOUT_PATH = "/base/status.html"
 
 # The switch writes flash while the upload POST is in flight.
 _FIRMWARE_UPLOAD_TIMEOUT = 600
@@ -303,11 +306,15 @@ class NetgearBaseUiApi:
         session = self._get_session()
         url = self._url(path)
         # Referer on every request: a browser always carries one, and the
-        # newer cheetah firmware answers 403 to any request without it.
+        # newer cheetah firmware answers 403 to any request without it. A POST
+        # to an EmWeb action ("page.html/a1") is refered from the page itself,
+        # so drop the trailing "/aN"; base-UI POSTs have none and are
+        # unaffected.
+        post_referer = re.sub(r"/a\d+$", "", url)
         request = (
             session.get(url, headers={"Referer": self._url("/base/web_main.html")})
             if data is None
-            else session.post(url, data=data, headers={"Referer": url})
+            else session.post(url, data=data, headers={"Referer": post_referer})
         )
         try:
             async with request as resp:
@@ -729,9 +736,31 @@ class NetgearBaseUiApi:
             "SNMP trap registration is not supported on this switch model"
         )
 
+    async def async_logout(self) -> None:
+        """End the web session so its slot is freed immediately.
+
+        These switches allow very few concurrent HTTP sessions — as few as
+        four — with a long idle timeout, so a leaked session can lock the UI
+        (and this integration) out for up to an hour. This posts the session
+        token back to /base/status.html, the exact request the UI's logout
+        button makes; without it, every reload/restart would strand a slot.
+        """
+        if not self._logged_in:
+            return
+        try:
+            page = await self._attempt_request(_LOGOUT_PATH, None)
+            token = _input_value(page, "sessionID") if page else ""
+            if token:
+                await self._attempt_request(_LOGOUT_PATH, {"sessionID": token})
+        except NetgearError:
+            # A failed logout only means the slot waits out its idle timeout.
+            _LOGGER.debug("Logout request failed on %s", self.host, exc_info=True)
+        finally:
+            self._logged_in = False
+
     async def async_close(self) -> None:
-        """Close the HTTP session if we own it."""
-        self._logged_in = False
+        """Log out and close the HTTP session if we own it."""
+        await self.async_logout()
         if self._owns_session and self._session is not None:
             await self._session.close()
             self._session = None
@@ -746,8 +775,25 @@ _CHEETAH_CELL_RE = re.compile(
 # Its column order is fixed by firmware, keyed off the g-label always in col 1.
 _CHEETAH_POE_COLS = {1: "port", 2: "admin", 15: "power", 17: "status"}
 _CHEETAH_PORT_COLS = {1: "port", 2: "alias"}
+_CHEETAH_ADMIN_COL = 2
 # The <td aid='1_<r>_1'> row on sysInfo.html: model, boot, then software.
 _CHEETAH_AID_RE = re.compile(r"aid=['\"]1_(\d+)_1['\"][^>]*>([^<]*)<", re.I)
+
+# A posted cell, capturing its full name, port index, cell count and column.
+_CHEETAH_POST_CELL_RE = re.compile(
+    r"NAME=(1\.(\d+)\.(\d+)\.v_\d+_\d+_(\d+))\s+VALUE=\"([^\"]*)\"", re.I
+)
+# Hidden control fields the form carries alongside the table.
+_CHEETAH_CONTROL_FIELDS = (
+    "submit_target",
+    "err_flag",
+    "err_msg",
+    "clazz_information",
+)
+# xui_operation_submit: the Apply button sets submit_flag to this before
+# posting. The form's own default is 0 ("reload"), which the switch renders
+# but never applies — so an edit only takes effect when we send 8.
+_CHEETAH_SUBMIT_OP = "8"
 
 
 def _cheetah_rows(html: str, columns: dict[int, str]) -> list[dict[str, str]]:
@@ -765,6 +811,37 @@ def _cheetah_rows(html: str, columns: dict[int, str]) -> list[dict[str, str]]:
     ]
 
 
+def _cheetah_poe_write_body(
+    html: str, port: int, admin_value: str
+) -> dict[str, str] | None:
+    """Build the PoE-form POST that flips one port's admin mode.
+
+    The EmWeb form echoes the whole table back; the browser posts every
+    hidden cell at its current value and overwrites only the edited one.
+    Mirroring that means no other port can change — every field but the
+    target rides along verbatim. Returns None if the port isn't present.
+    """
+    target = port - 1  # rows are 0-based; g1 is index 0
+    count: str | None = None
+    found = False
+    body: dict[str, str] = {}
+    for name, index, cells, col, value in _CHEETAH_POST_CELL_RE.findall(html):
+        if int(index) == target and int(col) == _CHEETAH_ADMIN_COL:
+            value = admin_value
+            count = cells
+            found = True
+        body[name] = value
+    if not found or count is None:
+        return None
+    # Check the target row's select box, as the browser does on an edit.
+    body[f"1.{target}.{count}.gecb_1_{_CHEETAH_ADMIN_COL}"] = "on"
+    for field in _CHEETAH_CONTROL_FIELDS:
+        body[field] = _input_value(html, field)
+    # Apply, not reload — see _CHEETAH_SUBMIT_OP.
+    body["submit_flag"] = _CHEETAH_SUBMIT_OP
+    return body
+
+
 class NetgearCheetahApi(NetgearBaseUiApi):
     """Client for the S350-series ("cheetah") firmware, e.g. the GS324TP.
 
@@ -779,8 +856,10 @@ class NetgearCheetahApi(NetgearBaseUiApi):
     The tables are laid out differently too: each cell is an EmWeb input
     named "1.<index>.<count>.v_..._<col>" rather than a header-aligned <td>,
     so the read helpers here parse by that scheme instead of by column
-    header. Writes are not implemented yet — the EmWeb submit echoes the
-    whole table back and wants careful, hardware-tested reverse engineering.
+    header. PoE control posts the whole table back with one port's admin
+    cell changed and submit_flag=8 ("apply", vs the form's 0 = "reload");
+    see _cheetah_poe_write_body. The ifAlias write is a separate form and is
+    not implemented yet.
     """
 
     _login_path = "/base/cheetah_login.html"
@@ -873,19 +952,28 @@ class NetgearCheetahApi(NetgearBaseUiApi):
         return data
 
     async def async_set_port_enabled(self, port: int, enabled: bool) -> None:
-        """Not implemented on this generation yet."""
-        raise NetgearError(
-            "PoE control is not yet supported on S350-series (cheetah) switches"
-        )
+        """Enable or disable PoE on a port, preserving every other setting.
+
+        Posts the whole PoE table back with just this port's admin mode
+        changed (see _cheetah_poe_write_body). async_power_cycle_port is
+        inherited and drives this.
+        """
+        html = await self._request("/poeInterfaceConfiguration.html")
+        body = _cheetah_poe_write_body(html, port, "Enable" if enabled else "Disable")
+        if body is None:
+            raise NetgearError(f"Port g{port} not found on the switch")
+        resp = await self._request("/poeInterfaceConfiguration.html/a1", data=body)
+        if _input_value(resp, "err_flag") == "1":
+            reason = _input_value(resp, "err_msg") or _UNKNOWN_ERROR
+            raise NetgearError(f"Switch rejected the change: {reason}")
 
     async def async_set_port_name(self, port: int, name: str) -> None:
-        """Not implemented on this generation yet."""
+        """Not implemented on this generation yet.
+
+        Port PoE control works; the ifAlias write is a separate EmWeb form
+        that still needs its own hardware-tested reverse engineering. SNMP
+        supplies port names in the meantime.
+        """
         raise NetgearError(
             "Setting port names is not yet supported on S350-series switches"
-        )
-
-    async def async_power_cycle_port(self, port: int) -> None:
-        """Not implemented on this generation yet."""
-        raise NetgearError(
-            "Power cycling is not yet supported on S350-series (cheetah) switches"
         )
