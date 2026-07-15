@@ -144,6 +144,17 @@ def _float_or(text: str, default: float = 0.0) -> float:
         return default
 
 
+def _parse_port_names(html: str) -> dict[int, str]:
+    """Return {port: description} from the port-config table."""
+    names: dict[int, str] = {}
+    for row in _port_rows(html, ("Port", "Description", "Link Status")):
+        match = _PORT_RE.match(row.get("Port", ""))
+        descr = row.get("Description", "").strip()
+        if match and descr:
+            names[int(match.group(1))] = descr
+    return names
+
+
 class NetgearBaseUiApi:
     """Async PoE client for the classic /base/ web UI. Mirrors NetgearPoeApi."""
 
@@ -271,24 +282,59 @@ class NetgearBaseUiApi:
         """
         last_exc: NetgearError | None = None
         for attempt in range(retries + 1):
+            if attempt:
+                await asyncio.sleep(1.5)
             try:
                 html = await self._request("/base/system/port/port_cfg.html")
             except NetgearError as err:
                 last_exc = err
-            else:
-                names: dict[int, str] = {}
-                for row in _port_rows(html, ("Port", "Description", "Link Status")):
-                    match = _PORT_RE.match(row.get("Port", ""))
-                    descr = row.get("Description", "").strip()
-                    if match and descr:
-                        names[int(match.group(1))] = descr
-                if names:
-                    return names
-            if attempt < retries:
-                await asyncio.sleep(1.5)
+                continue
+            if names := _parse_port_names(html):
+                return names
         if last_exc is not None:
             raise last_exc
         return {}
+
+    async def _async_refresh_port_names(self) -> None:
+        """Refresh the cached port names, tolerating a transient failure.
+
+        Names rarely change: they are fetched on the first poll (with retries,
+        so entities come up named) and occasionally thereafter to pick up a
+        rename without a reload.
+        """
+        if not self.web_port_names_enabled:
+            return
+        if self._port_names and self._poll_count % 20:
+            return
+        initial = not self._port_names
+        try:
+            names = await self._async_fetch_port_names(retries=3 if initial else 0)
+        except NetgearError:
+            if initial:
+                _LOGGER.warning(
+                    "Could not fetch port names from %s; ports will be "
+                    "unnamed until the next refresh",
+                    self.host,
+                )
+            return
+        if names:
+            self._port_names = names
+
+    def _to_poe_port(self, row: dict[str, str]) -> PoePort | None:
+        """Map one row of the PoE table to a port, or None if it isn't one."""
+        match = _PORT_RE.match(row["Port"])
+        if match is None:
+            return None
+        port = int(match.group(1))
+        status = row.get("Status", "").lower()
+        return PoePort(
+            port=port,
+            admin_enabled=row.get("Admin Mode") == "Enable",
+            detection_status=_DETECTION_STATUS.get(status, status or "unknown"),
+            power_watts=_float_or(row.get("Output Power (Watt)", "")),
+            alias=self._port_names.get(port, ""),
+            raw=dict(row),
+        )
 
     async def async_get_data(self) -> PoeData:
         """Fetch PoE state for all ports."""
@@ -297,40 +343,13 @@ class NetgearBaseUiApi:
         if not rows:
             raise NetgearError("No PoE ports in poe_port_cfg response")
 
-        # Port names rarely change; refresh them on the first poll (with
-        # retries so entities come up named) and occasionally thereafter.
-        if self.web_port_names_enabled and (
-            not self._port_names or self._poll_count % 20 == 0
-        ):
-            initial = not self._port_names
-            try:
-                names = await self._async_fetch_port_names(retries=3 if initial else 0)
-                if names:
-                    self._port_names = names
-            except NetgearError:
-                if initial:
-                    _LOGGER.warning(
-                        "Could not fetch port names from %s; ports will be "
-                        "unnamed until the next refresh",
-                        self.host,
-                    )
+        await self._async_refresh_port_names()
         self._poll_count += 1
 
         data = PoeData()
         for row in rows:
-            match = _PORT_RE.match(row["Port"])
-            if match is None:
-                continue
-            port = int(match.group(1))
-            status = row.get("Status", "").lower()
-            data.ports[port] = PoePort(
-                port=port,
-                admin_enabled=row.get("Admin Mode") == "Enable",
-                detection_status=_DETECTION_STATUS.get(status, status or "unknown"),
-                power_watts=_float_or(row.get("Output Power (Watt)", "")),
-                alias=self._port_names.get(port, ""),
-                raw=dict(row),
-            )
+            if (port_data := self._to_poe_port(row)) is not None:
+                data.ports[port_data.port] = port_data
         data.consumption_watts = await self._async_consumed_power()
         return data
 

@@ -196,6 +196,46 @@ async def test_get_data_skips_names_when_snmp_supplies_them() -> None:
     assert not any("port/port_cfg" in path for path in paths)
 
 
+async def test_fetch_port_names_retries_then_succeeds() -> None:
+    """A transient failure is retried, and the retry's names are kept."""
+    api = NetgearBaseUiApi("host", "pw")
+    api._request = AsyncMock(side_effect=[NetgearError("transient"), PORT_CFG_HTML])
+
+    with patch(
+        "custom_components.netgear_poe.api_base_ui.asyncio.sleep", new=AsyncMock()
+    ) as sleep:
+        names = await api._async_fetch_port_names(retries=1)
+
+    assert names == {2: "garage cam"}
+    # One sleep between the two attempts — never after the last one.
+    assert sleep.await_count == 1
+
+
+async def test_fetch_port_names_raises_after_last_retry() -> None:
+    """When every attempt fails, the switch's error surfaces."""
+    api = NetgearBaseUiApi("host", "pw")
+    api._request = AsyncMock(side_effect=NetgearError("boom"))
+
+    with patch(
+        "custom_components.netgear_poe.api_base_ui.asyncio.sleep", new=AsyncMock()
+    ):
+        with pytest.raises(NetgearError, match="boom"):
+            await api._async_fetch_port_names(retries=2)
+
+    assert api._request.await_count == 3
+
+
+async def test_get_data_keeps_names_when_refresh_fails() -> None:
+    """A later name refresh that fails leaves the cached names in place."""
+    api = _api({"poe_port_cfg": POE_PORT_HTML, "poe_cfg": POE_CFG_HTML})
+    api._port_names = {1: "cached cam"}
+    api._poll_count = 20  # due for a refresh; port_cfg is not served -> fails
+
+    data = await api.async_get_data()
+
+    assert data.ports[1].alias == "cached cam"
+
+
 async def test_get_data_without_ports_raises() -> None:
     """A page with no port rows is an error, not an empty result."""
     api = _api({"poe_port_cfg": "<html><body>Access Denied</body></html>"})
