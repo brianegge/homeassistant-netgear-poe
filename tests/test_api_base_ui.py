@@ -212,6 +212,57 @@ async def test_fetch_port_names_retries_then_succeeds() -> None:
     assert sleep.await_count == 1
 
 
+async def test_fetch_port_names_does_not_retry_when_nothing_is_named() -> None:
+    """A switch with no descriptions answers {} at once, without retrying."""
+    unnamed = PORT_CFG_HTML.replace("<TD>garage cam</TD>", "<TD></TD>")
+    api = NetgearBaseUiApi("host", "pw")
+    api._request = AsyncMock(return_value=unnamed)
+
+    with patch(
+        "custom_components.netgear_poe.api_base_ui.asyncio.sleep", new=AsyncMock()
+    ) as sleep:
+        names = await api._async_fetch_port_names(retries=3)
+
+    assert names == {}
+    assert api._request.await_count == 1
+    sleep.assert_not_awaited()
+
+
+async def test_fetch_port_names_retries_when_table_missing() -> None:
+    """An unparseable page is a failure, so it retries and then raises."""
+    api = NetgearBaseUiApi("host", "pw")
+    api._request = AsyncMock(return_value="<html><body>Access Denied</body></html>")
+
+    with (
+        patch(
+            "custom_components.netgear_poe.api_base_ui.asyncio.sleep", new=AsyncMock()
+        ),
+        pytest.raises(NetgearError, match="No port rows"),
+    ):
+        await api._async_fetch_port_names(retries=1)
+
+    assert api._request.await_count == 2
+
+
+async def test_refresh_port_names_clears_stale_names() -> None:
+    """Descriptions cleared on the switch drop out of the cache."""
+    unnamed = PORT_CFG_HTML.replace("<TD>garage cam</TD>", "<TD></TD>")
+    api = _api(
+        {
+            "poe_port_cfg": POE_PORT_HTML,
+            "poe_cfg": POE_CFG_HTML,
+            "port/port_cfg": unnamed,
+        }
+    )
+    api._port_names = {2: "garage cam"}
+    api._poll_count = 20  # due for a refresh
+
+    data = await api.async_get_data()
+
+    assert api._port_names == {}
+    assert data.ports[2].alias == ""
+
+
 async def test_fetch_port_names_raises_after_last_retry() -> None:
     """When every attempt fails, the switch's error surfaces."""
     api = NetgearBaseUiApi("host", "pw")

@@ -144,10 +144,17 @@ def _float_or(text: str, default: float = 0.0) -> float:
         return default
 
 
-def _parse_port_names(html: str) -> dict[int, str]:
-    """Return {port: description} from the port-config table."""
+def _parse_port_names(html: str) -> dict[int, str] | None:
+    """Return {port: description}, or None if the table wasn't found.
+
+    An empty dict is a real answer — no port has a description yet — and is
+    kept distinct from a page that couldn't be parsed at all.
+    """
+    rows = _port_rows(html, ("Port", "Description", "Link Status"))
+    if not rows:
+        return None
     names: dict[int, str] = {}
-    for row in _port_rows(html, ("Port", "Description", "Link Status")):
+    for row in rows:
         match = _PORT_RE.match(row.get("Port", ""))
         descr = row.get("Description", "").strip()
         if match and descr:
@@ -282,7 +289,9 @@ class NetgearBaseUiApi:
         """Return {port: description} from the port config page.
 
         Entity names are set from the first poll, so the initial fetch retries
-        to ride out a transient switch error.
+        to ride out a transient switch error. Retries cover only failures: a
+        switch where nothing is named answers {} on the first attempt rather
+        than retrying its way to the same result.
         """
         last_exc: NetgearError | None = None
         for attempt in range(retries + 1):
@@ -293,11 +302,11 @@ class NetgearBaseUiApi:
             except NetgearError as err:
                 last_exc = err
                 continue
-            if names := _parse_port_names(html):
+            names = _parse_port_names(html)
+            if names is not None:
                 return names
-        if last_exc is not None:
-            raise last_exc
-        return {}
+            last_exc = NetgearError("No port rows in port_cfg response")
+        raise last_exc or NetgearError("Could not fetch port names")
 
     async def _async_refresh_port_names(self) -> None:
         """Refresh the cached port names, tolerating a transient failure.
@@ -314,6 +323,8 @@ class NetgearBaseUiApi:
         try:
             names = await self._async_fetch_port_names(retries=3 if initial else 0)
         except NetgearError:
+            # Keep whatever is cached; only a failure lands here, so an empty
+            # result below is the switch's answer rather than a lost page.
             if initial:
                 _LOGGER.warning(
                     "Could not fetch port names from %s; ports will be "
@@ -321,8 +332,7 @@ class NetgearBaseUiApi:
                     self.host,
                 )
             return
-        if names:
-            self._port_names = names
+        self._port_names = names
 
     def _to_poe_port(self, row: dict[str, str]) -> PoePort | None:
         """Map one row of the PoE table to a port, or None if it isn't one."""
