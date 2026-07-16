@@ -801,13 +801,43 @@ _CHEETAH_UPLOAD_PATH = "/http_file_download.html"
 _CHEETAH_IMAGE_STATUS_PATH = "/dualImageStatus.html"
 _CHEETAH_DUAL_IMAGE_PATH = "/dualImageConfiguration.html"
 _CHEETAH_REBOOT_PATH = "/deviceReboot.html"
-# Upload form fields: file type is an *enum* combo, so it posts the index into
-# L7_FILE_TYPES_t (0 = "Code"); posting the label is rejected outright. The
-# image-name combo is a plain string, so it posts "image1"/"image2".
+# Upload form fields. These values were confirmed against a packet capture of
+# the switch's own web UI performing a successful firmware upload — the switch's
+# error messages are misleading, so guessing from the page markup was not
+# enough. The winning request posts, alongside the file:
+#   v_1_10_1  = "Code"   File Type, as the LABEL (not the enum index)
+#   v_1_2_2   = imageN   Image Name combo (the selected slot)
+#   v_1_9_1   = imageN   the REAL destination — "Local HTTP File Name"; the
+#                        combo above is only a UI helper that copies into this
+#   v_1_3_4   = filename the uploaded file's name, echoed into a hidden field
+#   v_1_9_2   = "1"      "HTTP Download Start" — the flag that begins the flash
+#   v_1_1_3   = "HTTP"   Transfer Mode
+#   submit_flag = "8"    apply (forced by the replay)
 _CHEETAH_FILE_TYPE_FIELD = "v_1_10_1"
-_CHEETAH_FILE_TYPE_CODE = "0"
+_CHEETAH_FILE_TYPE_CODE = "Code"
 _CHEETAH_UPLOAD_SLOT_FIELD = "v_1_2_2"
+_CHEETAH_DEST_SLOT_FIELD = "v_1_9_1"
+_CHEETAH_FILE_NAME_FIELD = "v_1_3_4"
 _CHEETAH_UPLOAD_FILE_FIELD = ".v_1_3_1_handle"
+# The switch renders every write-only field with an empty VALUE and relies on
+# its own JS to fill them back in before submitting: xui_load.js's
+# xuiLoadElementValuesFromJS() copies xeData.xeleValue_<xid> into any input the
+# server left blank. Replaying the rendered form therefore posts an empty
+# "HTTP Download Start", and the switch accepts the whole 26 MB upload, reports
+# no error, and never writes flash.
+#
+# Only these singleton fields are filled in, deliberately: the same rule
+# applied form-wide would post Port Reset="Reset" for every port of the PoE
+# table (its cells are write-only too), power-cycling every camera on the
+# switch. A browser gets away with it because widget construction runs after
+# the fill and overwrites those cells; replaying the raw form does not.
+_CHEETAH_UPLOAD_DEFAULTS = {
+    # Transfer Mode. A hidden enum keeps its label rather than the index a
+    # combo would post.
+    "v_1_1_3": "HTTP",
+    # "HTTP Download Start" — the flag that actually starts the flash.
+    "v_1_9_2": "1",
+}
 # "Transfer In Progress" (L7_BOOL: "In progress" / " not in progress").
 _CHEETAH_TRANSFER_FIELD = "v_1_3_2"
 _CHEETAH_IN_PROGRESS = "In progress"
@@ -1122,8 +1152,11 @@ class NetgearCheetahApi(NetgearBaseUiApi):
         fields = _cheetah_replay_ordered(
             _cheetah_form(page, "/a1"),
             {
+                **_CHEETAH_UPLOAD_DEFAULTS,
                 _CHEETAH_FILE_TYPE_FIELD: _CHEETAH_FILE_TYPE_CODE,
                 _CHEETAH_UPLOAD_SLOT_FIELD: slot,
+                _CHEETAH_DEST_SLOT_FIELD: slot,
+                _CHEETAH_FILE_NAME_FIELD: filename,
             },
         )
         form = aiohttp.FormData()
