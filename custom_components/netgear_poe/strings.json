@@ -77,12 +77,27 @@
     },
     "power_cycle_failed": {
       "message": "Failed to power cycle port {port} of {host}: {error}"
+    },
+    "set_port_name_failed": {
+      "message": "Failed to set the name of port {port} of {host}: {error}"
     }
   },
   "entity": {
     "sensor": {
       "poe_power": {
         "name": "PoE power"
+      }
+    }
+  },
+  "services": {
+    "set_port_name": {
+      "name": "Set port name",
+      "description": "Sets the description of a switch port, shown as the port's name.",
+      "fields": {
+        "name": {
+          "name": "Name",
+          "description": "New port description. An empty string clears it."
+        }
       }
     }
   }

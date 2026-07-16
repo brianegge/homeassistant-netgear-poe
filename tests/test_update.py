@@ -1,0 +1,360 @@
+"""Tests for the firmware update platform."""
+
+from __future__ import annotations
+
+import io
+import zipfile
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+from homeassistant.components.update import UpdateEntityFeature
+from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
+from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+from custom_components.netgear_poe.api import NetgearError
+from custom_components.netgear_poe.const import FirmwareRelease
+from custom_components.netgear_poe.update import _extract_image, resolve_release
+
+from .conftest import MOCK_FIRMWARE, MOCK_MODEL, setup_integration
+
+UPDATE_ENTITY = "update.boiler_switch_firmware"
+GS110TP_OID = "1.3.6.1.4.1.4526.100.4.19"  # the v1; v2/v3 are other products
+GS108TV2_OID = "1.3.6.1.4.1.4526.100.4.18"
+
+NEW_RELEASE = FirmwareRelease(
+    version="9.9.9.9",
+    url="https://downloads.example.com/fw_V9.9.9.9.zip",
+    notes_url="https://kb.example.com/9999",
+)
+
+
+def _zip_with_stk(image: bytes) -> bytes:
+    """Build a Netgear-style zip: the .stk image plus release notes."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("fw_V9.9.9.9_Release_Notes.html", "<html>notes</html>")
+        archive.writestr("fw_V9.9.9.9.stk", image)
+    return buffer.getvalue()
+
+
+def _download_session(body: bytes) -> MagicMock:
+    """A fake HA clientsession serving `body` for any GET.
+
+    Not aioclient_mock: that builds a real ClientSession, whose default
+    connector spawns a pycares resolver thread the test harness then flags
+    as lingering.
+    """
+    resp = MagicMock()
+    resp.raise_for_status = MagicMock()
+    resp.read = AsyncMock(return_value=body)
+    ctx = MagicMock()
+    ctx.__aenter__ = AsyncMock(return_value=resp)
+    ctx.__aexit__ = AsyncMock(return_value=False)
+    session = MagicMock()
+    session.get = MagicMock(return_value=ctx)
+    return session
+
+
+def test_resolve_unknown_model_is_none() -> None:
+    """A model absent from the map offers nothing (no false alarm)."""
+    assert resolve_release("6.0.1.16", "9.9.9.9.9", "mystery") is None
+
+
+def test_resolve_known_newer() -> None:
+    """A known model on old firmware surfaces the bundled release."""
+    release = resolve_release("5.4.2.30", GS110TP_OID, "GS110TP")
+    assert release is not None
+    assert release.version == "5.4.2.35"
+    assert release.url and release.url.endswith(".zip")
+    assert release.notes_url and "kb.netgear.com" in release.notes_url
+
+
+def test_gs110tp_v1_is_not_offered_the_v2_firmware() -> None:
+    """5.4.2.35 is the last GS110TP (v1) build; 5.4.2.36 is v2-only.
+
+    The map picks the image Install writes to a live switch, so offering a
+    GS110TPv2 build to v1 hardware would flash the wrong firmware. v1 is what
+    reports this sysObjectID.
+    """
+    release = resolve_release("5.4.2.30", GS110TP_OID, "GS110TP")
+    assert release is not None
+    assert release.version == "5.4.2.35"
+    assert release.url and "GS108Tv2_GS110TP_V5.4.2.35" in release.url
+    # Not the GS110TPv2 build. ("v2" alone would match GS108Tv2 in the name.)
+    assert "gs110tpv2" not in release.url.lower()
+
+
+def test_gs108tv2_has_its_own_newer_release() -> None:
+    """The GS108Tv2 is a distinct sysObjectID and is still getting builds."""
+    release = resolve_release("5.4.2.35", GS108TV2_OID, "GS108Tv2")
+    assert release is not None
+    assert release.version == "5.4.2.36"
+    # It shares the release with the GS110TPv2, not with the GS110TP (v1).
+    assert release.url and "GS108Tv2_GS110TPv2_V5.4.2.36" in release.url
+
+
+def test_resolve_up_to_date_is_none() -> None:
+    """Matching installed and bundled versions offer nothing."""
+    release = resolve_release("5.4.2.30", GS110TP_OID, "x")
+    assert release is not None
+    assert resolve_release(release.version, GS110TP_OID, "x") is None
+
+
+def test_resolve_never_downgrades() -> None:
+    """A device newer than the map is not offered an older version."""
+    assert resolve_release("5.4.2.40", GS110TP_OID, "x") is None
+
+
+def test_resolve_falls_back_to_model_key() -> None:
+    """When the sysObjectID is unknown, the model name is tried."""
+    with patch.dict(
+        "custom_components.netgear_poe.const.LATEST_FIRMWARE",
+        {"GS728TPv2": FirmwareRelease(version="7.0.0.0")},
+        clear=False,
+    ):
+        release = resolve_release("6.0.0.0", "", "GS728TPv2")
+    assert release is not None
+    assert release.version == "7.0.0.0"
+
+
+def test_extract_image_from_zip() -> None:
+    """The .stk inside Netgear's zip is picked over the release notes."""
+    filename, image = _extract_image(_zip_with_stk(b"IMAGE"), "https://x/fw.zip")
+    assert filename == "fw_V9.9.9.9.stk"
+    assert image == b"IMAGE"
+
+
+def test_extract_image_passes_through_raw_stk() -> None:
+    """A URL naming the image itself may serve the image unwrapped."""
+    filename, image = _extract_image(b"raw-stk-bytes", "https://x/fw_V1.stk")
+    assert filename == "fw_V1.stk"
+    assert image == b"raw-stk-bytes"
+
+
+def test_extract_image_rejects_non_zip_from_a_zip_url() -> None:
+    """An error page served 200 for a .zip URL must never reach the switch.
+
+    It would otherwise be flashed over the rollback slot as "firmware".
+    """
+    with pytest.raises(HomeAssistantError, match="did not return a firmware image"):
+        _extract_image(b"<html><body>502 Bad Gateway</body></html>", "https://x/fw.zip")
+
+
+def test_extract_image_rejects_zip_without_an_image() -> None:
+    """A zip with no image member is an error, not a silent flash of junk."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("notes.html", "x")
+    blob = buffer.getvalue()
+    with pytest.raises(HomeAssistantError, match="No firmware image"):
+        _extract_image(blob, "https://x/fw.zip")
+
+
+def test_extract_image_finds_ros_archive() -> None:
+    """The xui models ship a .ros image rather than the /base/ models' .stk."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("GS516TP_V6.0.1.30_Release_Notes.html", "<html>x</html>")
+        archive.writestr("GS516TP_V6.0.1.30.ros", b"ROS-IMAGE")
+    filename, image = _extract_image(buffer.getvalue(), "https://x/fw.zip")
+    assert filename == "GS516TP_V6.0.1.30.ros"
+    assert image == b"ROS-IMAGE"
+
+
+async def test_update_entity_up_to_date(
+    hass: HomeAssistant,
+    mock_api: MagicMock,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """The entity reports the installed firmware and no update by default."""
+    await setup_integration(hass, mock_config_entry)
+
+    state = hass.states.get(UPDATE_ENTITY)
+    assert state is not None
+    assert state.state == "off"
+    assert state.attributes["installed_version"] == MOCK_FIRMWARE
+    assert state.attributes["latest_version"] == MOCK_FIRMWARE
+
+
+async def test_update_entity_available_without_install(
+    hass: HomeAssistant,
+    mock_api: MagicMock,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """A newer release shows as available; no Install on this backend."""
+    with patch.dict(
+        "custom_components.netgear_poe.const.LATEST_FIRMWARE",
+        {MOCK_MODEL: NEW_RELEASE},
+        clear=False,
+    ):
+        await setup_integration(hass, mock_config_entry)
+
+    state = hass.states.get(UPDATE_ENTITY)
+    assert state is not None
+    assert state.state == "on"
+    assert state.attributes["installed_version"] == MOCK_FIRMWARE
+    assert state.attributes["latest_version"] == "9.9.9.9"
+    assert state.attributes["release_url"] == NEW_RELEASE.notes_url
+    # The mocked backend models the JSON CGI API, which cannot flash.
+    assert not state.attributes["supported_features"] & UpdateEntityFeature.INSTALL
+
+
+async def test_update_entity_installs(
+    hass: HomeAssistant,
+    mock_api: MagicMock,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """Install downloads the zip and hands the .stk to the switch API."""
+    mock_api.supports_firmware_install = True
+    mock_api.async_install_firmware = AsyncMock()
+    session = _download_session(_zip_with_stk(b"IMAGE"))
+
+    with (
+        patch.dict(
+            "custom_components.netgear_poe.const.LATEST_FIRMWARE",
+            {MOCK_MODEL: NEW_RELEASE},
+            clear=False,
+        ),
+        patch(
+            "custom_components.netgear_poe.update.async_get_clientsession",
+            return_value=session,
+        ),
+    ):
+        await setup_integration(hass, mock_config_entry)
+
+        state = hass.states.get(UPDATE_ENTITY)
+        assert state is not None
+        assert state.attributes["supported_features"] & UpdateEntityFeature.INSTALL
+
+        await hass.services.async_call(
+            "update",
+            "install",
+            {"entity_id": UPDATE_ENTITY},
+            blocking=True,
+        )
+
+    assert session.get.call_args.args[0] == NEW_RELEASE.url
+
+    mock_api.async_install_firmware.assert_awaited_once()
+    args, kwargs = mock_api.async_install_firmware.await_args
+    assert args == (b"IMAGE", "9.9.9.9")
+    assert kwargs["filename"] == "fw_V9.9.9.9.stk"
+
+    state = hass.states.get(UPDATE_ENTITY)
+    assert state.state == "off"
+    assert state.attributes["installed_version"] == "9.9.9.9"
+    assert state.attributes["in_progress"] is False
+
+
+async def test_install_suspends_polling_and_resumes(
+    hass: HomeAssistant,
+    mock_api: MagicMock,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """Polling stops for the install and comes back afterwards.
+
+    These switches allow as few as four web sessions and take tens of minutes
+    to write flash, so a 30 s poll would fight the upgrade for a session slot.
+    """
+    seen: list[object] = []
+
+    async def record_interval(*args: object, **kwargs: object) -> None:
+        # Captured while the install is running.
+        seen.append(mock_config_entry.runtime_data.coordinator.update_interval)
+
+    mock_api.supports_firmware_install = True
+    mock_api.async_install_firmware = AsyncMock(side_effect=record_interval)
+
+    with (
+        patch.dict(
+            "custom_components.netgear_poe.const.LATEST_FIRMWARE",
+            {MOCK_MODEL: NEW_RELEASE},
+            clear=False,
+        ),
+        patch(
+            "custom_components.netgear_poe.update.async_get_clientsession",
+            return_value=_download_session(_zip_with_stk(b"IMAGE")),
+        ),
+    ):
+        await setup_integration(hass, mock_config_entry)
+        coordinator = mock_config_entry.runtime_data.coordinator
+        before = coordinator.update_interval
+        assert before is not None
+
+        await hass.services.async_call(
+            "update", "install", {"entity_id": UPDATE_ENTITY}, blocking=True
+        )
+
+    assert seen == [None], "polling was still scheduled during the install"
+    assert coordinator.update_interval == before, "polling was not resumed"
+
+
+async def test_install_resumes_polling_after_failure(
+    hass: HomeAssistant,
+    mock_api: MagicMock,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """A failed install must not leave the switch unpolled forever."""
+    mock_api.supports_firmware_install = True
+    mock_api.async_install_firmware = AsyncMock(side_effect=NetgearError("boom"))
+
+    with (
+        patch.dict(
+            "custom_components.netgear_poe.const.LATEST_FIRMWARE",
+            {MOCK_MODEL: NEW_RELEASE},
+            clear=False,
+        ),
+        patch(
+            "custom_components.netgear_poe.update.async_get_clientsession",
+            return_value=_download_session(_zip_with_stk(b"IMAGE")),
+        ),
+    ):
+        await setup_integration(hass, mock_config_entry)
+        coordinator = mock_config_entry.runtime_data.coordinator
+        before = coordinator.update_interval
+
+        with pytest.raises(HomeAssistantError):
+            await hass.services.async_call(
+                "update", "install", {"entity_id": UPDATE_ENTITY}, blocking=True
+            )
+
+    assert coordinator.update_interval == before
+
+
+async def test_update_entity_install_failure_surfaces(
+    hass: HomeAssistant,
+    mock_api: MagicMock,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """A switch-side failure raises and leaves the installed version alone."""
+    mock_api.supports_firmware_install = True
+    mock_api.async_install_firmware = AsyncMock(
+        side_effect=NetgearError("upload rejected")
+    )
+
+    with (
+        patch.dict(
+            "custom_components.netgear_poe.const.LATEST_FIRMWARE",
+            {MOCK_MODEL: NEW_RELEASE},
+            clear=False,
+        ),
+        patch(
+            "custom_components.netgear_poe.update.async_get_clientsession",
+            return_value=_download_session(_zip_with_stk(b"IMAGE")),
+        ),
+    ):
+        await setup_integration(hass, mock_config_entry)
+
+        with pytest.raises(HomeAssistantError, match="upload rejected"):
+            await hass.services.async_call(
+                "update",
+                "install",
+                {"entity_id": UPDATE_ENTITY},
+                blocking=True,
+            )
+
+    state = hass.states.get(UPDATE_ENTITY)
+    assert state.state == "on"
+    assert state.attributes["installed_version"] == MOCK_FIRMWARE
+    assert state.attributes["in_progress"] is False

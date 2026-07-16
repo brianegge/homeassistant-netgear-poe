@@ -8,3 +8,7 @@ htmlcov/
 .mypy_cache/
 .ruff_cache/
 .DS_Store
+
+# Local, machine-specific notes and settings (may contain credentials)
+CLAUDE.local.md
+.claude/settings.local.json

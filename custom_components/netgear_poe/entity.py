@@ -25,6 +25,7 @@ class NetgearPoeEntity(CoordinatorEntity[NetgearPoeCoordinator]):
             name=entry.runtime_data.sys_name or entry.title,
             manufacturer="Netgear",
             model=entry.runtime_data.model or None,
+            sw_version=entry.runtime_data.firmware or None,
             configuration_url=f"http://{coordinator.api.host}/",
         )
 

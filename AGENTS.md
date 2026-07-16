@@ -13,17 +13,21 @@ homeassistant-netgear-poe/
 ├── custom_components/
 │   └── netgear_poe/
 │       ├── __init__.py          # Coordinator, setup, NSDP discovery, trap wiring
-│       ├── api.py               # NetgearPoeApi: web CGI client (login, poe_port)
+│       ├── api.py               # NetgearPoeApi: JSON CGI client (login, poe_port)
+│       ├── api_legacy.py        # NetgearLegacyApi: xui XML + async_detect_api
+│       ├── api_base_ui.py       # NetgearBaseUiApi: classic /base/ HTML UI
 │       ├── snmp.py              # SnmpLinkMonitor: ifOperStatus + ifAlias walks
 │       ├── trap_receiver.py     # SnmpTrapReceiver: UDP 162 linkUp/linkDown
 │       ├── nsdp.py              # NSDP discovery scanner (async_discover)
 │       ├── config_flow.py       # user, discovery, reauth, reconfigure steps
 │       ├── const.py             # DOMAIN, intervals, CONF_* keys, PLATFORMS
 │       ├── entity.py            # NetgearPoeEntity / NetgearPoePortEntity bases
-│       ├── switch.py            # Per-port PoE on/off switches
+│       ├── switch.py            # Per-port PoE on/off switches, set_port_name
+│       ├── services.yaml        # set_port_name action description
 │       ├── button.py            # Per-port power-cycle buttons
 │       ├── sensor.py            # Total PoE power sensor
 │       ├── binary_sensor.py     # Per-port link sensors (SNMP)
+│       ├── update.py            # Firmware update entity (and install, /base/ UI)
 │       ├── diagnostics.py       # Config-entry diagnostics
 │       ├── manifest.json        # Metadata (requirements: pysnmp)
 │       ├── strings.json         # UI localization
@@ -35,13 +39,65 @@ homeassistant-netgear-poe/
 └── README.md
 ```
 
+## Firmware generations
+
+Four incompatible web UIs are in the wild. `async_detect_api` (in
+`api_legacy.py`) probes `GET /` once and picks the client; all expose the
+same interface, so everything above them is generation-agnostic.
+
+| Client | Firmware / models | Detected by |
+| --- | --- | --- |
+| `NetgearPoeApi` | JSON CGI (GS728TPv2, GS3xx) | none of the below |
+| `NetgearLegacyApi` | xui XML (GS516TP, 6.0.x) | 302 → `/csb<hex>/` |
+| `NetgearBaseUiApi` | classic HTML (GS110TP, 5.4.x) | `/base/main_login.html` in body |
+| `NetgearCheetahApi` | S350 EmWeb (GS324TP, 1.0.x) | `/base/cheetah_login.html` in body |
+
+`NetgearCheetahApi` subclasses `NetgearBaseUiApi` (shared FASTPATH login,
+Referer-on-every-request). Its probe branch runs **before** the `/base/` one
+since both live under `/base/`. Its pages are EmWeb routes at the site root
+(`/poeInterfaceConfiguration.html`) whose cells are hidden inputs named
+`1.<index>.<count>.v_..._<col>`; a PoE write echoes the whole table back with
+one admin cell changed. PoE control works; the ifAlias write and firmware
+install are not implemented for this generation yet. Its login locks out
+after repeated failures, so a wrong password stays wrong for ~15 min.
+
+Model names don't decide this — a GS110TPv3 is newer silicon and answers as the
+JSON generation. Only the probe is authoritative.
+
 ## Transport summary
 
 - **PoE control** — web CGI at `/cgi/get.cgi` and `/cgi/set.cgi`. Login posts
   an obfuscated password to `home_loginAuth`; writes carry an RSA-encrypted
   `X-CSRF-XSID` header. Commands: `poe_port`, `poe_portReset`, `port_port`
-  (names), `sys_info`, `snmp_trapConfgAdd`, `home_logout`. The switch limits
-  concurrent web sessions with an idle timeout — always log out.
+  (read names), `port_portEdit` (write names), `sys_info`,
+  `snmp_trapConfgAdd`, `home_logout`. The switch limits concurrent web
+  sessions with an idle timeout — always log out.
+- **Legacy xui PoE control** — XML over `/<prefix>/wcd?{PoEPSEInterfaceList}`;
+  see the module docstring in `api_legacy.py`.
+- **Classic /base/ PoE control** — HTML form posts, scraped by column header;
+  see the module docstring in `api_base_ui.py`. The switch answers `400` if a
+  posted body carries a field that page's form doesn't define, so each form
+  sends exactly its own field set.
+- **Firmware install** — `LATEST_FIRMWARE` in `const.py` maps sysObjectID →
+  `FirmwareRelease` (version + Netgear download URL + KB link). Both the
+  classic and xui backends implement `async_install_firmware`
+  (`supports_firmware_install`); the JSON CGI one does not. Either way the
+  image goes to the **inactive** dual-image slot, so the running firmware
+  stays flashed as a rollback, and the final reboot drops PoE and the
+  switch's uplink for a minute or more.
+  - *Classic /base/*: upload `.stk` to `system/http_file_download.html`
+    (`localfilename` picks the slot), activate `system/dual_image_cfg.html`,
+    reboot `system/sys_reset.html`. Never post `system/reset_cfg.html` —
+    that near-identical form is "Factory Default" and wipes the config. The
+    switch reports nothing while it writes flash, so progress sits at 20%.
+  - *xui*: upload the `.ros` archive to `Maintenance/httpConfigProcess.htm`
+    (`rlCopyDestinationFileType=8`); there is no slot field — the switch
+    writes to the inactive slot itself. It answers **302 on success**, so
+    the POST bypasses `_attempt_request` (which reads 302 as a dead
+    session). `{LoadStatus}` reports `copyStatusType` (1/2 busy, 5 done,
+    3/4 failed) plus `bytesTransfered`, polled alongside the upload exactly
+    as the vendor UI's iframe does — the one real progress signal we get.
+    Activate via `{ImageUnitList}` `nextBootImage`, reboot via `{Reload}`.
 - **Link state / port names** — SNMP v2c: `ifOperStatus` (link) and `ifAlias`
   (names, same source as LibreNMS). Preferred over the web CGI for names.
 - **Instant events** — SNMP trap receiver on UDP 162 (`linkUp`/`linkDown`).

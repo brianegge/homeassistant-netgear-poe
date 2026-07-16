@@ -10,6 +10,7 @@ from homeassistant.exceptions import HomeAssistantError
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.netgear_poe.api import NetgearError
+from custom_components.netgear_poe.const import DOMAIN, SERVICE_SET_PORT_NAME
 
 from .conftest import setup_integration
 
@@ -69,6 +70,41 @@ async def test_switch_turn_on(
         blocking=True,
     )
     mock_api.async_set_port_enabled.assert_awaited_with(2, True)
+
+
+async def test_set_port_name(
+    hass: HomeAssistant,
+    mock_api: MagicMock,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """Test the set_port_name action writes the description to the switch."""
+    await setup_integration(hass, mock_config_entry)
+
+    await hass.services.async_call(
+        DOMAIN,
+        SERVICE_SET_PORT_NAME,
+        {"entity_id": PORT_1_ENTITY, "name": "garage-cam"},
+        blocking=True,
+    )
+    mock_api.async_set_port_name.assert_awaited_with(1, "garage-cam")
+
+
+async def test_set_port_name_failure(
+    hass: HomeAssistant,
+    mock_api: MagicMock,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """Test a switch error surfaces as a HomeAssistantError."""
+    await setup_integration(hass, mock_config_entry)
+    mock_api.async_set_port_name.side_effect = NetgearError("denied")
+
+    with pytest.raises(HomeAssistantError):
+        await hass.services.async_call(
+            DOMAIN,
+            SERVICE_SET_PORT_NAME,
+            {"entity_id": PORT_1_ENTITY, "name": "garage-cam"},
+            blocking=True,
+        )
 
 
 async def test_switch_set_failure(
