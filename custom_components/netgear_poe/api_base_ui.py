@@ -841,12 +841,21 @@ _CHEETAH_UPLOAD_DEFAULTS = {
 # "Transfer In Progress" (L7_BOOL: "In progress" / " not in progress").
 _CHEETAH_TRANSFER_FIELD = "v_1_3_2"
 _CHEETAH_IN_PROGRESS = "In progress"
-# Activate form: image select, and the "Activate Image" checkbox (enable_t,
-# posted as a string — "Enable" is checked).
+# Activate form (confirmed against a packet capture of a working browser
+# activation). Ticking the "Activate Image" checkbox is not enough — the switch
+# reads a hidden companion, v_4_3_2 ("Active Image") = "TRUE", and the browser
+# also fills the description (v_4_2_1) with the version. Setting only the
+# checkbox posts cleanly and does nothing (next-active stays unchanged).
 _CHEETAH_ACTIVATE_SLOT_FIELD = "v_4_1_1"
 _CHEETAH_ACTIVATE_FIELD = "v_4_3_1"
-# Reboot form: "Check this box and click APPLY" (enable_t, same encoding).
+_CHEETAH_ACTIVE_IMAGE_FIELD = "v_4_3_2"
+_CHEETAH_ACTIVE_IMAGE_ON = "TRUE"
+_CHEETAH_ACTIVATE_DESC_FIELD = "v_4_2_1"
+# Reboot form (same capture): the real trigger is v_1_1_2 ("Reset Unit") = "1";
+# the visible confirm checkbox (v_1_2_1) alone does not reboot.
 _CHEETAH_REBOOT_CONFIRM_FIELD = "v_1_2_1"
+_CHEETAH_REBOOT_UNIT_FIELD = "v_1_1_2"
+_CHEETAH_REBOOT_UNIT_ON = "1"
 _CHEETAH_CHECKED = "Enable"
 # The switch buffers the image in seconds but then writes flash in the
 # background for tens of minutes (a 3 MB image takes 5+ min on this family, so
@@ -1234,6 +1243,10 @@ class NetgearCheetahApi(NetgearBaseUiApi):
             {
                 _CHEETAH_ACTIVATE_SLOT_FIELD: slot,
                 _CHEETAH_ACTIVATE_FIELD: _CHEETAH_CHECKED,
+                # The hidden companion the switch actually reads; the checkbox
+                # above is only the UI. Without it the POST is a no-op.
+                _CHEETAH_ACTIVE_IMAGE_FIELD: _CHEETAH_ACTIVE_IMAGE_ON,
+                _CHEETAH_ACTIVATE_DESC_FIELD: description,
             },
         )
         resp = await self._request(f"{_CHEETAH_DUAL_IMAGE_PATH}/a1", data=body)
@@ -1246,7 +1259,13 @@ class NetgearCheetahApi(NetgearBaseUiApi):
         try:
             html = _cheetah_form(await self._request(_CHEETAH_REBOOT_PATH), "/a1")
             body = _cheetah_replay(
-                html, {_CHEETAH_REBOOT_CONFIRM_FIELD: _CHEETAH_CHECKED}
+                html,
+                {
+                    _CHEETAH_REBOOT_CONFIRM_FIELD: _CHEETAH_CHECKED,
+                    # "Reset Unit" — the actual reboot trigger; the confirm
+                    # checkbox alone does not restart the switch.
+                    _CHEETAH_REBOOT_UNIT_FIELD: _CHEETAH_REBOOT_UNIT_ON,
+                },
             )
             await self._request(f"{_CHEETAH_REBOOT_PATH}/a1", data=body)
         except NetgearError:

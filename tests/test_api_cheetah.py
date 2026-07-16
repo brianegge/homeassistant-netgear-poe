@@ -259,6 +259,36 @@ UPLOAD_FORM_HTML = (
     "</FORM></body></html>"
 )
 
+# The Dual Image Configuration form. The checkbox (v_4_3_1) is the UI; the
+# switch reads the hidden "Active Image" (v_4_3_2) and the description.
+ACTIVATE_FORM_HTML = (
+    "<html><body>"
+    '<FORM method=post ACTION="/dualImageConfiguration.html/a1">'
+    '<INPUT xid=4_1_2 TYPE=hidden NAME=v_4_1_2 VALUE="1">'
+    '<INPUT xid=4_1_1 TYPE=hidden NAME=v_4_1_1 VALUE="image1">'
+    '<INPUT xid=4_5_1 TYPE=hidden NAME=v_4_5_1 VALUE="image1">'
+    '<INPUT xid=4_2_1 TYPE=hidden NAME=v_4_2_1 VALUE="">'
+    '<INPUT xid=4_3_1 TYPE=hidden NAME=v_4_3_1 VALUE="">'
+    '<INPUT xid=4_3_2 TYPE=hidden NAME=v_4_3_2 VALUE="">'
+    '<INPUT xid=4_4_1 TYPE=hidden NAME=v_4_4_1 VALUE="">'
+    '<INPUT TYPE="hidden" NAME="submit_flag" VALUE="0">'
+    '<INPUT TYPE="hidden" NAME="err_msg" VALUE="">'
+    "</FORM></body></html>"
+)
+
+# The Device Reboot form. The confirm checkbox (v_1_2_1) is the UI; the switch
+# reboots on the hidden "Reset Unit" (v_1_1_2).
+REBOOT_FORM_HTML = (
+    "<html><body>"
+    '<FORM method=post ACTION="/deviceReboot.html/a1">'
+    '<INPUT xid=1_1_1 TYPE=hidden NAME=v_1_1_1 VALUE="1">'
+    '<INPUT xid=1_1_2 TYPE=hidden NAME=v_1_1_2 VALUE="">'
+    '<INPUT xid=1_2_1 TYPE=hidden NAME=v_1_2_1 VALUE="">'
+    '<INPUT TYPE="hidden" NAME="submit_flag" VALUE="0">'
+    '<INPUT TYPE="hidden" NAME="err_msg" VALUE="">'
+    "</FORM></body></html>"
+)
+
 
 async def test_get_image_status() -> None:
     """The dual-image page maps to slot versions and active markers."""
@@ -378,10 +408,9 @@ def test_cheetah_replay_forces_apply_and_applies_changes() -> None:
     """The replay posts every field, changes the asked-for ones, applies."""
     from custom_components.netgear_poe.api_base_ui import _cheetah_replay
 
-    body = _cheetah_replay(UPLOAD_FORM_HTML, {"v_1_10_1": "0", "v_1_2_2": "image2"})
-    # File type posts the enum INDEX; posting the label "Code" is rejected.
-    assert body["v_1_10_1"] == "0"
-    # The image-name combo is a string, so the slot name posts as-is.
+    body = _cheetah_replay(UPLOAD_FORM_HTML, {"v_1_10_1": "Code", "v_1_2_2": "image2"})
+    # Every requested change is echoed verbatim into the replayed body.
+    assert body["v_1_10_1"] == "Code"
     assert body["v_1_2_2"] == "image2"
     # submit_flag 8 = apply; the form's own 0 only re-renders the page.
     assert body["submit_flag"] == "8"
@@ -396,3 +425,37 @@ async def test_transfer_in_progress_reads_the_flag() -> None:
     assert await _api({"http_file_download": busy})._async_transfer_in_progress()
     idle = _api({"http_file_download": UPLOAD_FORM_HTML})
     assert not await idle._async_transfer_in_progress()
+
+
+async def test_activate_image_posts_the_hidden_trigger() -> None:
+    """Activating a slot must set the hidden "Active Image" field, not just
+    tick the checkbox.
+
+    Confirmed against a packet capture: the switch reads v_4_3_2="TRUE" (and
+    the description); posting only the visible checkbox is a silent no-op that
+    leaves next-active unchanged.
+    """
+    api = _api({"dualImageConfiguration": ACTIVATE_FORM_HTML})
+    await api._async_activate_image("image2", "1.0.0.44")
+
+    post = [c for c in api._request.call_args_list if c.kwargs.get("data")][-1]
+    path, body = post.args[0], post.kwargs["data"]
+    assert path == "/dualImageConfiguration.html/a1"
+    assert body["v_4_1_1"] == "image2"  # the slot
+    assert body["v_4_3_2"] == "TRUE"  # the hidden trigger the switch reads
+    assert body["v_4_2_1"] == "1.0.0.44"  # description = version
+    assert body["v_4_3_1"] == "Enable"  # the checkbox, checked
+    assert body["submit_flag"] == "8"
+
+
+async def test_reboot_posts_the_reset_unit_trigger() -> None:
+    """Rebooting must set "Reset Unit" (v_1_1_2=1), not just the confirm box."""
+    api = _api({"deviceReboot": REBOOT_FORM_HTML})
+    await api._async_reboot()
+
+    post = [c for c in api._request.call_args_list if c.kwargs.get("data")][-1]
+    path, body = post.args[0], post.kwargs["data"]
+    assert path == "/deviceReboot.html/a1"
+    assert body["v_1_1_2"] == "1"  # Reset Unit — the real trigger
+    assert body["v_1_2_1"] == "Enable"  # confirm checkbox, checked
+    assert body["submit_flag"] == "8"
