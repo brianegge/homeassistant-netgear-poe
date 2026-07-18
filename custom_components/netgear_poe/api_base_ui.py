@@ -166,6 +166,18 @@ def _input_value(html: str, name: str) -> str:
     return unescape(value.group(1)).strip() if value else ""
 
 
+def _csrf_token(html: str) -> str:
+    """The CSRF token that cheetah firmware >= 1.0.0.44 stamps on every form.
+
+    Older firmware has none, so this returns "". The token must be echoed on
+    login (or the session is granted but every later request is bounced to the
+    login page) and on every state-changing POST. On the form pages it lives in
+    the sibling "a0" applet form, which _cheetah_form scopes out, so writes have
+    to add it back explicitly.
+    """
+    return _input_value(html, "CSRFToken")
+
+
 def _float_or(text: str, default: float = 0.0) -> float:
     try:
         return float(text)
@@ -271,16 +283,29 @@ class NetgearBaseUiApi:
         """Authenticate and store the SID session cookie."""
         self._logged_in = False
         session = self._get_session()
+        # Fetch the login form first: cheetah firmware >= 1.0.0.44 stamps a
+        # CSRFToken on it that must be echoed, or the switch hands out a SID and
+        # then bounces every subsequent request to the login page. Older
+        # firmware has no token, so this is a harmless extra GET.
+        data = {
+            "pwd": self._password,
+            **self._login_extra_fields,
+            "err_flag": "0",
+            "err_msg": "",
+        }
         try:
+            async with session.get(
+                self._url(self._login_path),
+                headers={"Referer": self._url("/")},
+            ) as resp:
+                resp.raise_for_status()
+                token = _csrf_token(await resp.text(encoding=_ENCODING))
+            if token:
+                data["CSRFToken"] = token
             async with session.post(
                 self._url(self._login_path),
-                data={
-                    "pwd": self._password,
-                    **self._login_extra_fields,
-                    "err_flag": "0",
-                    "err_msg": "",
-                },
-                headers={"Referer": self._url("/")},
+                data=data,
+                headers={"Referer": self._url(self._login_path)},
             ) as resp:
                 resp.raise_for_status()
                 text = await resp.text(encoding=_ENCODING)
@@ -976,6 +1001,11 @@ def _cheetah_poe_write_body(
         body[field] = _input_value(html, field)
     # Apply, not reload — see _CHEETAH_SUBMIT_OP.
     body["submit_flag"] = _CHEETAH_SUBMIT_OP
+    # Firmware >= 1.0.0.44 rejects a state-changing POST without the page's
+    # CSRF token; it sits outside the table, so add it explicitly.
+    token = _csrf_token(html)
+    if token:
+        body["CSRFToken"] = token
     return body
 
 
@@ -1158,16 +1188,17 @@ class NetgearCheetahApi(NetgearBaseUiApi):
         (or giving up after a few minutes) looks like a silent failure.
         """
         page = await self._request(_CHEETAH_UPLOAD_PATH)
-        fields = _cheetah_replay_ordered(
-            _cheetah_form(page, "/a1"),
-            {
-                **_CHEETAH_UPLOAD_DEFAULTS,
-                _CHEETAH_FILE_TYPE_FIELD: _CHEETAH_FILE_TYPE_CODE,
-                _CHEETAH_UPLOAD_SLOT_FIELD: slot,
-                _CHEETAH_DEST_SLOT_FIELD: slot,
-                _CHEETAH_FILE_NAME_FIELD: filename,
-            },
-        )
+        changes = {
+            **_CHEETAH_UPLOAD_DEFAULTS,
+            _CHEETAH_FILE_TYPE_FIELD: _CHEETAH_FILE_TYPE_CODE,
+            _CHEETAH_UPLOAD_SLOT_FIELD: slot,
+            _CHEETAH_DEST_SLOT_FIELD: slot,
+            _CHEETAH_FILE_NAME_FIELD: filename,
+        }
+        token = _csrf_token(page)  # firmware >= 1.0.0.44; empty on older
+        if token:
+            changes["CSRFToken"] = token
+        fields = _cheetah_replay_ordered(_cheetah_form(page, "/a1"), changes)
         form = aiohttp.FormData()
         for name, value in fields:
             if value is None:  # the file input's place in the form
@@ -1237,18 +1268,19 @@ class NetgearCheetahApi(NetgearBaseUiApi):
 
     async def _async_activate_image(self, slot: str, description: str = "") -> None:
         """Mark a slot as the image to boot from (next-active)."""
-        html = _cheetah_form(await self._request(_CHEETAH_DUAL_IMAGE_PATH), "/a1")
-        body = _cheetah_replay(
-            html,
-            {
-                _CHEETAH_ACTIVATE_SLOT_FIELD: slot,
-                _CHEETAH_ACTIVATE_FIELD: _CHEETAH_CHECKED,
-                # The hidden companion the switch actually reads; the checkbox
-                # above is only the UI. Without it the POST is a no-op.
-                _CHEETAH_ACTIVE_IMAGE_FIELD: _CHEETAH_ACTIVE_IMAGE_ON,
-                _CHEETAH_ACTIVATE_DESC_FIELD: description,
-            },
-        )
+        page = await self._request(_CHEETAH_DUAL_IMAGE_PATH)
+        changes = {
+            _CHEETAH_ACTIVATE_SLOT_FIELD: slot,
+            _CHEETAH_ACTIVATE_FIELD: _CHEETAH_CHECKED,
+            # The hidden companion the switch actually reads; the checkbox
+            # above is only the UI. Without it the POST is a no-op.
+            _CHEETAH_ACTIVE_IMAGE_FIELD: _CHEETAH_ACTIVE_IMAGE_ON,
+            _CHEETAH_ACTIVATE_DESC_FIELD: description,
+        }
+        token = _csrf_token(page)  # firmware >= 1.0.0.44; empty on older
+        if token:
+            changes["CSRFToken"] = token
+        body = _cheetah_replay(_cheetah_form(page, "/a1"), changes)
         resp = await self._request(f"{_CHEETAH_DUAL_IMAGE_PATH}/a1", data=body)
         reason = _cheetah_field_value(resp, "err_msg").strip()
         if reason:
@@ -1257,16 +1289,17 @@ class NetgearCheetahApi(NetgearBaseUiApi):
     async def _async_reboot(self) -> None:
         """Reboot the switch via the Device Reboot form."""
         try:
-            html = _cheetah_form(await self._request(_CHEETAH_REBOOT_PATH), "/a1")
-            body = _cheetah_replay(
-                html,
-                {
-                    _CHEETAH_REBOOT_CONFIRM_FIELD: _CHEETAH_CHECKED,
-                    # "Reset Unit" — the actual reboot trigger; the confirm
-                    # checkbox alone does not restart the switch.
-                    _CHEETAH_REBOOT_UNIT_FIELD: _CHEETAH_REBOOT_UNIT_ON,
-                },
-            )
+            page = await self._request(_CHEETAH_REBOOT_PATH)
+            changes = {
+                _CHEETAH_REBOOT_CONFIRM_FIELD: _CHEETAH_CHECKED,
+                # "Reset Unit" — the actual reboot trigger; the confirm
+                # checkbox alone does not restart the switch.
+                _CHEETAH_REBOOT_UNIT_FIELD: _CHEETAH_REBOOT_UNIT_ON,
+            }
+            token = _csrf_token(page)  # firmware >= 1.0.0.44; empty on older
+            if token:
+                changes["CSRFToken"] = token
+            body = _cheetah_replay(_cheetah_form(page, "/a1"), changes)
             await self._request(f"{_CHEETAH_REBOOT_PATH}/a1", data=body)
         except NetgearError:
             # The switch drops the connection as it goes down: that IS success.

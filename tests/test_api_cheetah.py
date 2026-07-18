@@ -459,3 +459,56 @@ async def test_reboot_posts_the_reset_unit_trigger() -> None:
     assert body["v_1_1_2"] == "1"  # Reset Unit — the real trigger
     assert body["v_1_2_1"] == "Enable"  # confirm checkbox, checked
     assert body["submit_flag"] == "8"
+
+
+LOGIN_PAGE_WITH_CSRF = (
+    '<html><body><FORM ACTION="/base/cheetah_login.html">'
+    '<INPUT type=hidden NAME="CSRFToken" VALUE="abc123deadbeef">'
+    '<INPUT type=password NAME="pwd" VALUE="">'
+    "</FORM></body></html>"
+)
+
+
+async def test_login_sends_csrf_token_when_present() -> None:
+    """Firmware >= 1.0.0.44 stamps a CSRFToken the login POST must echo.
+
+    Without it the switch grants a SID and then bounces every later request to
+    the login page — so the token, taken from the GET of the form, has to ride
+    on the credential POST.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    def ctx(text: str) -> MagicMock:
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.text = AsyncMock(return_value=text)
+        c = MagicMock()
+        c.__aenter__ = AsyncMock(return_value=resp)
+        c.__aexit__ = AsyncMock(return_value=False)
+        return c
+
+    session = MagicMock()
+    session.get = MagicMock(return_value=ctx(LOGIN_PAGE_WITH_CSRF))
+    session.post = MagicMock(return_value=ctx("<html>ok</html>"))
+    session.cookie_jar = [MagicMock(key="SID")]
+    api = NetgearCheetahApi("host", "pw", session=session)
+
+    await api.async_login()
+
+    posted = session.post.call_args.kwargs["data"]
+    assert posted["CSRFToken"] == "abc123deadbeef"
+    assert posted["submt"] == "16"  # the cheetah login field still rides along
+
+
+async def test_activate_image_carries_csrf_token() -> None:
+    """A state-changing POST must echo the page's CSRF token (it lives outside
+    the target form, so the replay would otherwise drop it)."""
+    page = ACTIVATE_FORM_HTML.replace(
+        "<html><body>",
+        '<html><body><INPUT type=hidden NAME="CSRFToken" VALUE="tok-9f">',
+    )
+    api = _api({"dualImageConfiguration": page})
+    await api._async_activate_image("image2", "1.0.0.44")
+
+    post = [c for c in api._request.call_args_list if c.kwargs.get("data")][-1]
+    assert post.kwargs["data"]["CSRFToken"] == "tok-9f"

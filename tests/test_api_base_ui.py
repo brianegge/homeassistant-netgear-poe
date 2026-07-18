@@ -507,7 +507,16 @@ def _login_session(with_sid: bool) -> MagicMock:
     ctx = MagicMock()
     ctx.__aenter__ = AsyncMock(return_value=resp)
     ctx.__aexit__ = AsyncMock(return_value=False)
+    # async_login GETs the form first (to read a CSRF token on firmware that
+    # has one); this base-UI login page carries none.
+    get_resp = MagicMock()
+    get_resp.raise_for_status = MagicMock()
+    get_resp.text = AsyncMock(return_value="<html>login</html>")
+    get_ctx = MagicMock()
+    get_ctx.__aenter__ = AsyncMock(return_value=get_resp)
+    get_ctx.__aexit__ = AsyncMock(return_value=False)
     session = MagicMock()
+    session.get = MagicMock(return_value=get_ctx)
     session.post = MagicMock(return_value=ctx)
     session.cookie_jar = [MagicMock(key="SID")] if with_sid else []
     return session
