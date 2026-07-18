@@ -551,12 +551,15 @@ async def test_reboot_surfaces_a_refusal() -> None:
         await api._async_reboot()
 
 
-async def test_progress_upload_streams_and_reports_per_chunk() -> None:
-    """The streaming payload hands the body out in chunks, reporting each.
+@pytest.mark.parametrize("via", ["write", "write_with_length"])
+async def test_progress_upload_streams_and_reports_per_chunk(via: str) -> None:
+    """The streaming payload steps the percent as chunks go out.
 
-    This is what makes the bar move during the upload instead of jumping once
-    the POST returns; a multi-chunk image must produce several increasing
-    callbacks that finish exactly at the total (so Content-Length holds).
+    Both entry points must work: aiohttp <= 3.11 calls write(), aiohttp >= 3.12
+    (HA's container runs 3.14) calls write_with_length() for a sized body —
+    overriding only write() left the callbacks dead under HA. A multi-chunk
+    image must produce several increasing percents in [base, base+span),
+    de-duplicated, while every byte is still sent exactly once.
     """
     from custom_components.netgear_poe.api_base_ui import (
         _UPLOAD_CHUNK_BYTES,
@@ -564,14 +567,12 @@ async def test_progress_upload_streams_and_reports_per_chunk() -> None:
         _ProgressUpload,
     )
 
-    image = b"x" * (_UPLOAD_CHUNK_BYTES * 3 + 7)  # 4 chunks
+    image = b"x" * (_UPLOAD_CHUNK_BYTES * 8 + 7)  # 9 chunks
     body, content_type = _multipart_upload_body(
         [("f", "v"), ("file", None)], "fw.stk", image
     )
-    seen: list[tuple[int, int]] = []
-    payload = _ProgressUpload(
-        body, content_type, lambda sent, total: seen.append((sent, total))
-    )
+    seen: list[int] = []
+    payload = _ProgressUpload(body, content_type, seen.append, base=20, span=40)
 
     written: list[bytes] = []
 
@@ -579,11 +580,14 @@ async def test_progress_upload_streams_and_reports_per_chunk() -> None:
         async def write(self, chunk: bytes) -> None:
             written.append(chunk)
 
-    await payload.write(_Writer())
+    if via == "write":
+        await payload.write(_Writer())
+    else:
+        await payload.write_with_length(_Writer(), len(body))
 
     assert b"".join(written) == body  # every byte sent, exactly once
-    assert len(seen) >= 4  # one callback per chunk, not a single jump
-    sent_values = [s for s, _ in seen]
-    assert sent_values == sorted(sent_values)  # monotonic
-    assert seen[-1][0] == seen[-1][1] == len(body)  # ends at Content-Length
+    assert len(seen) >= 3  # steps, not a single jump
+    assert seen == sorted(seen)  # monotonic
+    assert seen == sorted(set(seen))  # de-duplicated (no repeated percents)
+    assert seen[0] >= 20 and seen[-1] <= 59  # within [base, base+span)
     assert payload.size == len(body)  # a plain sized body, not chunked

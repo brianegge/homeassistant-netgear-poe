@@ -52,31 +52,66 @@ from .api import (
 _LOGGER = logging.getLogger(__name__)
 
 # Firmware uploads stream the body in chunks so the progress bar can move as
-# the image goes out. 256 KiB keeps the callback rate sane for a ~26 MB image.
-_UPLOAD_CHUNK_BYTES = 256 * 1024
+# the image goes out. 64 KiB is fine-grained enough that even a slow classic
+# switch (~10 KB/s) steps the bar every few seconds, and matches aiohttp's
+# transport high-water mark so a slow reader applies backpressure per chunk.
+_UPLOAD_CHUNK_BYTES = 64 * 1024
 
 
 class _ProgressUpload(aiohttp.BytesPayload):
-    """A multipart body that reports upload progress as bytes are sent.
+    """A multipart body that steps a progress callback as bytes are sent.
 
-    Stays a plain bytes payload so Content-Length is set — these switches
-    reject chunked uploads — and overrides write() to hand the body to the
-    socket in chunks, calling back after each. "Sent" means handed to the
-    socket, which can run a little ahead of what the switch has actually
-    stored, so callers keep the reported range short of the next milestone.
+    Stays a plain sized bytes payload so Content-Length is set — these
+    switches reject chunked uploads — and hands the body to the socket in
+    chunks, reporting an integer percent in [base, base+span) after each. Only
+    changes are reported, so a fast (fully buffered) upload doesn't spam the
+    entity. "Sent" is bytes handed to the socket, which can lead what the
+    switch has stored, so the range stops one short of base+span rather than
+    claiming its next milestone.
+
+    aiohttp >= 3.12 drives a sized body through write_with_length(); older
+    aiohttp uses write(). Overriding only write() (as a first cut did) meant
+    the body still streamed but the callbacks never ran under HA's aiohttp.
     """
 
     def __init__(
-        self, body: bytes, content_type: str, on_sent: Callable[[int, int], None]
+        self,
+        body: bytes,
+        content_type: str,
+        report: Callable[[int], None] | None,
+        base: int,
+        span: int,
     ) -> None:
         super().__init__(body, content_type=content_type)
-        self._on_sent = on_sent
+        self._report = report
+        self._base = base
+        self._span = span
+        self._last = -1
+
+    def _tick(self, sent: int, total: int) -> None:
+        if self._report is None:
+            return
+        pct = self._base + min(sent * self._span // max(total, 1), self._span - 1)
+        if pct != self._last:
+            self._last = pct
+            self._report(pct)
+
+    async def _stream(
+        self, writer: aiohttp.abc.AbstractStreamWriter, limit: int | None
+    ) -> None:
+        data = self._value if limit is None else self._value[:limit]
+        total = len(data)
+        for start in range(0, total, _UPLOAD_CHUNK_BYTES):
+            await writer.write(data[start : start + _UPLOAD_CHUNK_BYTES])
+            self._tick(min(start + _UPLOAD_CHUNK_BYTES, total), total)
 
     async def write(self, writer: aiohttp.abc.AbstractStreamWriter) -> None:
-        total = len(self._value)
-        for start in range(0, total, _UPLOAD_CHUNK_BYTES):
-            await writer.write(self._value[start : start + _UPLOAD_CHUNK_BYTES])
-            self._on_sent(min(start + _UPLOAD_CHUNK_BYTES, total), total)
+        await self._stream(writer, None)
+
+    async def write_with_length(
+        self, writer: aiohttp.abc.AbstractStreamWriter, content_length: int | None
+    ) -> None:
+        await self._stream(writer, content_length)
 
 
 def _multipart_upload_body(
@@ -660,16 +695,14 @@ class NetgearBaseUiApi:
             ("err_msg", ""),
         ]
         body, content_type = _multipart_upload_body(fields, filename, image)
-
-        def on_sent(sent: int, total: int) -> None:
-            if progress is not None:
-                progress(20 + min(sent * 40 // max(total, 1), 39))
+        # The switch flashes as it reads, so the upload spans 20..60 here.
+        payload = _ProgressUpload(body, content_type, progress, 20, 40)
 
         url = self._url(_FIRMWARE_UPLOAD_PATH)
         try:
             async with self._get_session().post(
                 url,
-                data=_ProgressUpload(body, content_type, on_sent),
+                data=payload,
                 headers={"Referer": url},
                 timeout=aiohttp.ClientTimeout(total=_FIRMWARE_UPLOAD_TIMEOUT),
             ) as resp:
@@ -1277,18 +1310,15 @@ class NetgearCheetahApi(NetgearBaseUiApi):
             changes["CSRFToken"] = token
         fields = _cheetah_replay_ordered(_cheetah_form(page, "/a1"), changes)
         body, content_type = _multipart_upload_body(fields, filename, image)
-
-        def on_sent(sent: int, total: int) -> None:
-            # The byte upload is quick (the switch buffers, then flashes); give
-            # it 20..40 and leave 40..60 for the flash-write poll below.
-            if progress is not None:
-                progress(20 + min(sent * 20 // max(total, 1), 19))
+        # The switch buffers fast then flashes: give the upload 20..40 and
+        # leave 40..60 for the flash-write poll below.
+        payload = _ProgressUpload(body, content_type, progress, 20, 20)
 
         url = self._url(f"{_CHEETAH_UPLOAD_PATH}/a1")
         try:
             async with self._get_session().post(
                 url,
-                data=_ProgressUpload(body, content_type, on_sent),
+                data=payload,
                 headers={"Referer": self._url(_CHEETAH_UPLOAD_PATH)},
                 timeout=aiohttp.ClientTimeout(total=_FIRMWARE_UPLOAD_TIMEOUT),
             ) as resp:
