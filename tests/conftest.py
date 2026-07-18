@@ -164,3 +164,27 @@ async def setup_integration(hass: HomeAssistant, entry: MockConfigEntry) -> None
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
+
+
+def parse_upload_payload(payload: object) -> list[tuple[str, object]]:
+    """Parse a _ProgressUpload multipart body into ordered (name, value) pairs.
+
+    Text values come back as str, the file part as bytes. Lets the upload
+    tests assert on the real streamed body now that it is built by hand
+    (a plain bytes payload) rather than an aiohttp FormData.
+    """
+    content_type = payload.content_type  # type: ignore[attr-defined]
+    boundary = content_type.split("boundary=")[1].encode()
+    body = payload._value  # type: ignore[attr-defined]
+    fields: list[tuple[str, object]] = []
+    for raw in body.split(b"--" + boundary):
+        if b"Content-Disposition" not in raw:
+            continue
+        head, _, value = raw.lstrip(b"\r\n").partition(b"\r\n\r\n")
+        if value.endswith(b"\r\n"):
+            value = value[:-2]
+        head_text = head.decode("latin1")
+        name = head_text.split('name="')[1].split('"')[0]
+        is_file = "filename=" in head_text
+        fields.append((name, value if is_file else value.decode("latin1")))
+    return fields

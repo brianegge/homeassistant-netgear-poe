@@ -35,6 +35,7 @@ import re
 from collections.abc import Callable
 from html import unescape
 from typing import ClassVar
+from uuid import uuid4
 
 import aiohttp
 
@@ -49,6 +50,67 @@ from .api import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# Firmware uploads stream the body in chunks so the progress bar can move as
+# the image goes out. 256 KiB keeps the callback rate sane for a ~26 MB image.
+_UPLOAD_CHUNK_BYTES = 256 * 1024
+
+
+class _ProgressUpload(aiohttp.BytesPayload):
+    """A multipart body that reports upload progress as bytes are sent.
+
+    Stays a plain bytes payload so Content-Length is set — these switches
+    reject chunked uploads — and overrides write() to hand the body to the
+    socket in chunks, calling back after each. "Sent" means handed to the
+    socket, which can run a little ahead of what the switch has actually
+    stored, so callers keep the reported range short of the next milestone.
+    """
+
+    def __init__(
+        self, body: bytes, content_type: str, on_sent: Callable[[int, int], None]
+    ) -> None:
+        super().__init__(body, content_type=content_type)
+        self._on_sent = on_sent
+
+    async def write(self, writer: aiohttp.abc.AbstractStreamWriter) -> None:
+        total = len(self._value)
+        for start in range(0, total, _UPLOAD_CHUNK_BYTES):
+            await writer.write(self._value[start : start + _UPLOAD_CHUNK_BYTES])
+            self._on_sent(min(start + _UPLOAD_CHUNK_BYTES, total), total)
+
+
+def _multipart_upload_body(
+    fields: list[tuple[str, str | None]], filename: str, image: bytes
+) -> tuple[bytes, str]:
+    """Assemble a multipart/form-data body, file part at its ordered slot.
+
+    Mirrors what the switch's own upload form posts (and what the reverse-
+    engineering probes used): each text field in document order carrying only
+    a Content-Disposition, the file part where the file input sits. A field is
+    the file when its value is None. Returns (body, Content-Type header value).
+    """
+    boundary = "----netgearpoe" + uuid4().hex
+    crlf = b"\r\n"
+    marker = b"--" + boundary.encode()
+    out: list[bytes] = []
+    for name, value in fields:
+        out.append(marker + crlf)
+        header = f'Content-Disposition: form-data; name="{name}"'
+        if value is None:  # the file input's position
+            out.append(
+                f'{header}; filename="{filename}"'.encode()
+                + crlf
+                + b"Content-Type: application/octet-stream"
+                + crlf
+                + crlf
+            )
+            out.append(image)
+            out.append(crlf)
+        else:
+            out.append(header.encode() + crlf + crlf + value.encode() + crlf)
+    out.append(marker + b"--" + crlf)
+    return b"".join(out), f"multipart/form-data; boundary={boundary}"
+
 
 _ROW_RE = re.compile(r"<tr[^>]*>(.*?)</tr>", re.I | re.S)
 _CELL_RE = re.compile(r"<t[dh][^>]*>(.*?)</t[dh]>", re.I | re.S)
@@ -571,35 +633,43 @@ class NetgearBaseUiApi:
         return _parse_image_status(await self._request(_IMAGE_STATUS_PATH))
 
     async def _async_upload_firmware(
-        self, slot: str, image: bytes, filename: str
+        self,
+        slot: str,
+        image: bytes,
+        filename: str,
+        progress: Callable[[int], None] | None = None,
     ) -> None:
         """Upload a firmware image to a slot via the HTTP File Download form.
 
         Posted directly rather than through _request: the body is multipart
         (a browser file upload), and the switch flashes the image while the
-        POST is in flight, so it needs its own generous timeout.
+        POST is in flight, so it needs its own generous timeout. Because the
+        switch reads the body as it writes flash, streaming it in chunks makes
+        the progress bar track the real transfer (20..60 here).
         """
-        form = aiohttp.FormData()
         # Field order mirrors the form; a field it doesn't define answers 400.
-        form.add_field("file_type", "code")
-        form.add_field("localfilename", slot)
-        form.add_field(
-            ".filename_handle",
-            image,
-            filename=filename,
-            content_type="application/octet-stream",
-        )
-        form.add_field("download_status", "")
-        form.add_field("submt", _SUBMIT)
-        form.add_field("cncel", "")
-        form.add_field("err_flag", "0")
-        form.add_field("err_msg", "")
+        # The None marks where the file part goes.
+        fields: list[tuple[str, str | None]] = [
+            ("file_type", "code"),
+            ("localfilename", slot),
+            (".filename_handle", None),
+            ("download_status", ""),
+            ("submt", _SUBMIT),
+            ("cncel", ""),
+            ("err_flag", "0"),
+            ("err_msg", ""),
+        ]
+        body, content_type = _multipart_upload_body(fields, filename, image)
+
+        def on_sent(sent: int, total: int) -> None:
+            if progress is not None:
+                progress(20 + min(sent * 40 // max(total, 1), 39))
 
         url = self._url(_FIRMWARE_UPLOAD_PATH)
         try:
             async with self._get_session().post(
                 url,
-                data=form,
+                data=_ProgressUpload(body, content_type, on_sent),
                 headers={"Referer": url},
                 timeout=aiohttp.ClientTimeout(total=_FIRMWARE_UPLOAD_TIMEOUT),
             ) as resp:
@@ -735,7 +805,7 @@ class NetgearBaseUiApi:
             status.current_active,
         )
         report(20)
-        await self._async_upload_firmware(target, image, filename)
+        await self._async_upload_firmware(target, image, filename, progress)
 
         staged = await self.async_get_image_status()
         if staged.versions.get(target) != version:
@@ -1206,23 +1276,19 @@ class NetgearCheetahApi(NetgearBaseUiApi):
         if token:
             changes["CSRFToken"] = token
         fields = _cheetah_replay_ordered(_cheetah_form(page, "/a1"), changes)
-        form = aiohttp.FormData()
-        for name, value in fields:
-            if value is None:  # the file input's place in the form
-                form.add_field(
-                    name,
-                    image,
-                    filename=filename,
-                    content_type="application/octet-stream",
-                )
-            else:
-                form.add_field(name, value)
+        body, content_type = _multipart_upload_body(fields, filename, image)
+
+        def on_sent(sent: int, total: int) -> None:
+            # The byte upload is quick (the switch buffers, then flashes); give
+            # it 20..40 and leave 40..60 for the flash-write poll below.
+            if progress is not None:
+                progress(20 + min(sent * 20 // max(total, 1), 19))
 
         url = self._url(f"{_CHEETAH_UPLOAD_PATH}/a1")
         try:
             async with self._get_session().post(
                 url,
-                data=form,
+                data=_ProgressUpload(body, content_type, on_sent),
                 headers={"Referer": self._url(_CHEETAH_UPLOAD_PATH)},
                 timeout=aiohttp.ClientTimeout(total=_FIRMWARE_UPLOAD_TIMEOUT),
             ) as resp:
@@ -1241,9 +1307,10 @@ class NetgearCheetahApi(NetgearBaseUiApi):
         for attempt in range(_CHEETAH_FLASH_POLL_ATTEMPTS):
             await asyncio.sleep(_CHEETAH_FLASH_POLL_SECONDS)
             if progress is not None:
-                # 20..60 across the flash window; a real wait, not a spinner,
-                # but the switch reports no byte count to scale by.
-                progress(20 + min(attempt * 40 // _CHEETAH_FLASH_POLL_ATTEMPTS, 39))
+                # 40..60 across the flash window (the upload used 20..40); a
+                # real wait, not a spinner, but the switch reports no byte
+                # count to scale by, so this tracks elapsed poll attempts.
+                progress(40 + min(attempt * 20 // _CHEETAH_FLASH_POLL_ATTEMPTS, 19))
             try:
                 if await self._async_transfer_in_progress():
                     started = True

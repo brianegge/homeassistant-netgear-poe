@@ -13,6 +13,7 @@ import pytest
 
 from custom_components.netgear_poe.api import NetgearError
 from custom_components.netgear_poe.api_base_ui import NetgearCheetahApi
+from tests.conftest import parse_upload_payload
 
 # A firmware version string (dotted quad, but not an IP address).
 NEW_FW = "1.0.0.44"  # NOSONAR
@@ -369,8 +370,7 @@ async def test_upload_firmware_posts_the_fields_that_start_the_flash(
     # image2 already holds this version, so the first poll sees it landed.
     await api._async_upload_firmware(b"stk-bytes", "fw.stk", "image2", NEW_FW)
 
-    form = session.post.call_args.kwargs["data"]
-    values = {options["name"]: value for options, _headers, value in form._fields}
+    values = dict(parse_upload_payload(session.post.call_args.kwargs["data"]))
     assert values["v_1_9_2"] == "1"  # HTTP Download Start — the trigger
     assert values["v_1_1_3"] == "HTTP"  # Transfer Mode
     assert values["v_1_10_1"] == "Code"  # File Type as the LABEL, not an index
@@ -549,3 +549,41 @@ async def test_reboot_surfaces_a_refusal() -> None:
     api._request = AsyncMock(return_value=refused)
     with pytest.raises(NetgearError, match="refused to reboot"):
         await api._async_reboot()
+
+
+async def test_progress_upload_streams_and_reports_per_chunk() -> None:
+    """The streaming payload hands the body out in chunks, reporting each.
+
+    This is what makes the bar move during the upload instead of jumping once
+    the POST returns; a multi-chunk image must produce several increasing
+    callbacks that finish exactly at the total (so Content-Length holds).
+    """
+    from custom_components.netgear_poe.api_base_ui import (
+        _UPLOAD_CHUNK_BYTES,
+        _multipart_upload_body,
+        _ProgressUpload,
+    )
+
+    image = b"x" * (_UPLOAD_CHUNK_BYTES * 3 + 7)  # 4 chunks
+    body, content_type = _multipart_upload_body(
+        [("f", "v"), ("file", None)], "fw.stk", image
+    )
+    seen: list[tuple[int, int]] = []
+    payload = _ProgressUpload(
+        body, content_type, lambda sent, total: seen.append((sent, total))
+    )
+
+    written: list[bytes] = []
+
+    class _Writer:
+        async def write(self, chunk: bytes) -> None:
+            written.append(chunk)
+
+    await payload.write(_Writer())
+
+    assert b"".join(written) == body  # every byte sent, exactly once
+    assert len(seen) >= 4  # one callback per chunk, not a single jump
+    sent_values = [s for s, _ in seen]
+    assert sent_values == sorted(sent_values)  # monotonic
+    assert seen[-1][0] == seen[-1][1] == len(body)  # ends at Content-Length
+    assert payload.size == len(body)  # a plain sized body, not chunked

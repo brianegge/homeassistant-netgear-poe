@@ -22,6 +22,7 @@ from custom_components.netgear_poe.api_base_ui import (
     DualImageStatus,
     NetgearBaseUiApi,
 )
+from tests.conftest import parse_upload_payload
 
 
 def _cells(*values: str) -> str:
@@ -652,7 +653,7 @@ async def test_install_firmware_targets_inactive_slot() -> None:
     )
 
     api._async_upload_firmware.assert_awaited_once_with(
-        "image1", b"stk-bytes", "fw.stk"
+        "image1", b"stk-bytes", "fw.stk", progress.append
     )
     api._async_activate_image.assert_awaited_once_with("image1")
     api._async_reboot.assert_awaited_once()
@@ -735,8 +736,8 @@ async def test_upload_firmware_posts_multipart_to_upload_form() -> None:
 
     url = session.post.call_args.args[0]
     assert url.endswith("/base/system/http_file_download.html")
-    form = session.post.call_args.kwargs["data"]
-    names = [options["name"] for options, _headers, _value in form._fields]
+    fields = parse_upload_payload(session.post.call_args.kwargs["data"])
+    names = [name for name, _value in fields]
     # Exactly the form's own fields, in form order — anything else answers 400.
     assert names == [
         "file_type",
@@ -748,7 +749,7 @@ async def test_upload_firmware_posts_multipart_to_upload_form() -> None:
         "err_flag",
         "err_msg",
     ]
-    values = {options["name"]: value for options, _headers, value in form._fields}
+    values = dict(fields)
     assert values["file_type"] == "code"
     assert values["localfilename"] == "image1"
     assert values[".filename_handle"] == b"stk-bytes"
