@@ -166,6 +166,18 @@ def _input_value(html: str, name: str) -> str:
     return unescape(value.group(1)).strip() if value else ""
 
 
+def _csrf_token(html: str) -> str:
+    """The CSRF token that cheetah firmware >= 1.0.0.44 stamps on every form.
+
+    Older firmware has none, so this returns "". The token must be echoed on
+    login (or the session is granted but every later request is bounced to the
+    login page) and on every state-changing POST. On the form pages it lives in
+    the sibling "a0" applet form, which _cheetah_form scopes out, so writes have
+    to add it back explicitly.
+    """
+    return _input_value(html, "CSRFToken")
+
+
 def _float_or(text: str, default: float = 0.0) -> float:
     try:
         return float(text)
@@ -271,16 +283,29 @@ class NetgearBaseUiApi:
         """Authenticate and store the SID session cookie."""
         self._logged_in = False
         session = self._get_session()
+        # Fetch the login form first: cheetah firmware >= 1.0.0.44 stamps a
+        # CSRFToken on it that must be echoed, or the switch hands out a SID and
+        # then bounces every subsequent request to the login page. Older
+        # firmware has no token, so this is a harmless extra GET.
+        data = {
+            "pwd": self._password,
+            **self._login_extra_fields,
+            "err_flag": "0",
+            "err_msg": "",
+        }
         try:
+            async with session.get(
+                self._url(self._login_path),
+                headers={"Referer": self._url("/")},
+            ) as resp:
+                resp.raise_for_status()
+                token = _csrf_token(await resp.text(encoding=_ENCODING))
+            if token:
+                data["CSRFToken"] = token
             async with session.post(
                 self._url(self._login_path),
-                data={
-                    "pwd": self._password,
-                    **self._login_extra_fields,
-                    "err_flag": "0",
-                    "err_msg": "",
-                },
-                headers={"Referer": self._url("/")},
+                data=data,
+                headers={"Referer": self._url(self._login_path)},
             ) as resp:
                 resp.raise_for_status()
                 text = await resp.text(encoding=_ENCODING)
@@ -801,22 +826,61 @@ _CHEETAH_UPLOAD_PATH = "/http_file_download.html"
 _CHEETAH_IMAGE_STATUS_PATH = "/dualImageStatus.html"
 _CHEETAH_DUAL_IMAGE_PATH = "/dualImageConfiguration.html"
 _CHEETAH_REBOOT_PATH = "/deviceReboot.html"
-# Upload form fields: file type is an *enum* combo, so it posts the index into
-# L7_FILE_TYPES_t (0 = "Code"); posting the label is rejected outright. The
-# image-name combo is a plain string, so it posts "image1"/"image2".
+# Upload form fields. These values were confirmed against a packet capture of
+# the switch's own web UI performing a successful firmware upload — the switch's
+# error messages are misleading, so guessing from the page markup was not
+# enough. The winning request posts, alongside the file:
+#   v_1_10_1  = "Code"   File Type, as the LABEL (not the enum index)
+#   v_1_2_2   = imageN   Image Name combo (the selected slot)
+#   v_1_9_1   = imageN   the REAL destination — "Local HTTP File Name"; the
+#                        combo above is only a UI helper that copies into this
+#   v_1_3_4   = filename the uploaded file's name, echoed into a hidden field
+#   v_1_9_2   = "1"      "HTTP Download Start" — the flag that begins the flash
+#   v_1_1_3   = "HTTP"   Transfer Mode
+#   submit_flag = "8"    apply (forced by the replay)
 _CHEETAH_FILE_TYPE_FIELD = "v_1_10_1"
-_CHEETAH_FILE_TYPE_CODE = "0"
+_CHEETAH_FILE_TYPE_CODE = "Code"
 _CHEETAH_UPLOAD_SLOT_FIELD = "v_1_2_2"
+_CHEETAH_DEST_SLOT_FIELD = "v_1_9_1"
+_CHEETAH_FILE_NAME_FIELD = "v_1_3_4"
 _CHEETAH_UPLOAD_FILE_FIELD = ".v_1_3_1_handle"
+# The switch renders every write-only field with an empty VALUE and relies on
+# its own JS to fill them back in before submitting: xui_load.js's
+# xuiLoadElementValuesFromJS() copies xeData.xeleValue_<xid> into any input the
+# server left blank. Replaying the rendered form therefore posts an empty
+# "HTTP Download Start", and the switch accepts the whole 26 MB upload, reports
+# no error, and never writes flash.
+#
+# Only these singleton fields are filled in, deliberately: the same rule
+# applied form-wide would post Port Reset="Reset" for every port of the PoE
+# table (its cells are write-only too), power-cycling every camera on the
+# switch. A browser gets away with it because widget construction runs after
+# the fill and overwrites those cells; replaying the raw form does not.
+_CHEETAH_UPLOAD_DEFAULTS = {
+    # Transfer Mode. A hidden enum keeps its label rather than the index a
+    # combo would post.
+    "v_1_1_3": "HTTP",
+    # "HTTP Download Start" — the flag that actually starts the flash.
+    "v_1_9_2": "1",
+}
 # "Transfer In Progress" (L7_BOOL: "In progress" / " not in progress").
 _CHEETAH_TRANSFER_FIELD = "v_1_3_2"
 _CHEETAH_IN_PROGRESS = "In progress"
-# Activate form: image select, and the "Activate Image" checkbox (enable_t,
-# posted as a string — "Enable" is checked).
+# Activate form (confirmed against a packet capture of a working browser
+# activation). Ticking the "Activate Image" checkbox is not enough — the switch
+# reads a hidden companion, v_4_3_2 ("Active Image") = "TRUE", and the browser
+# also fills the description (v_4_2_1) with the version. Setting only the
+# checkbox posts cleanly and does nothing (next-active stays unchanged).
 _CHEETAH_ACTIVATE_SLOT_FIELD = "v_4_1_1"
 _CHEETAH_ACTIVATE_FIELD = "v_4_3_1"
-# Reboot form: "Check this box and click APPLY" (enable_t, same encoding).
+_CHEETAH_ACTIVE_IMAGE_FIELD = "v_4_3_2"
+_CHEETAH_ACTIVE_IMAGE_ON = "TRUE"
+_CHEETAH_ACTIVATE_DESC_FIELD = "v_4_2_1"
+# Reboot form (same capture): the real trigger is v_1_1_2 ("Reset Unit") = "1";
+# the visible confirm checkbox (v_1_2_1) alone does not reboot.
 _CHEETAH_REBOOT_CONFIRM_FIELD = "v_1_2_1"
+_CHEETAH_REBOOT_UNIT_FIELD = "v_1_1_2"
+_CHEETAH_REBOOT_UNIT_ON = "1"
 _CHEETAH_CHECKED = "Enable"
 # The switch buffers the image in seconds but then writes flash in the
 # background for tens of minutes (a 3 MB image takes 5+ min on this family, so
@@ -937,6 +1001,11 @@ def _cheetah_poe_write_body(
         body[field] = _input_value(html, field)
     # Apply, not reload — see _CHEETAH_SUBMIT_OP.
     body["submit_flag"] = _CHEETAH_SUBMIT_OP
+    # Firmware >= 1.0.0.44 rejects a state-changing POST without the page's
+    # CSRF token; it sits outside the table, so add it explicitly.
+    token = _csrf_token(html)
+    if token:
+        body["CSRFToken"] = token
     return body
 
 
@@ -1119,13 +1188,17 @@ class NetgearCheetahApi(NetgearBaseUiApi):
         (or giving up after a few minutes) looks like a silent failure.
         """
         page = await self._request(_CHEETAH_UPLOAD_PATH)
-        fields = _cheetah_replay_ordered(
-            _cheetah_form(page, "/a1"),
-            {
-                _CHEETAH_FILE_TYPE_FIELD: _CHEETAH_FILE_TYPE_CODE,
-                _CHEETAH_UPLOAD_SLOT_FIELD: slot,
-            },
-        )
+        changes = {
+            **_CHEETAH_UPLOAD_DEFAULTS,
+            _CHEETAH_FILE_TYPE_FIELD: _CHEETAH_FILE_TYPE_CODE,
+            _CHEETAH_UPLOAD_SLOT_FIELD: slot,
+            _CHEETAH_DEST_SLOT_FIELD: slot,
+            _CHEETAH_FILE_NAME_FIELD: filename,
+        }
+        token = _csrf_token(page)  # firmware >= 1.0.0.44; empty on older
+        if token:
+            changes["CSRFToken"] = token
+        fields = _cheetah_replay_ordered(_cheetah_form(page, "/a1"), changes)
         form = aiohttp.FormData()
         for name, value in fields:
             if value is None:  # the file input's place in the form
@@ -1195,31 +1268,56 @@ class NetgearCheetahApi(NetgearBaseUiApi):
 
     async def _async_activate_image(self, slot: str, description: str = "") -> None:
         """Mark a slot as the image to boot from (next-active)."""
-        html = _cheetah_form(await self._request(_CHEETAH_DUAL_IMAGE_PATH), "/a1")
-        body = _cheetah_replay(
-            html,
-            {
-                _CHEETAH_ACTIVATE_SLOT_FIELD: slot,
-                _CHEETAH_ACTIVATE_FIELD: _CHEETAH_CHECKED,
-            },
-        )
+        page = await self._request(_CHEETAH_DUAL_IMAGE_PATH)
+        changes = {
+            _CHEETAH_ACTIVATE_SLOT_FIELD: slot,
+            _CHEETAH_ACTIVATE_FIELD: _CHEETAH_CHECKED,
+            # The hidden companion the switch actually reads; the checkbox
+            # above is only the UI. Without it the POST is a no-op.
+            _CHEETAH_ACTIVE_IMAGE_FIELD: _CHEETAH_ACTIVE_IMAGE_ON,
+            _CHEETAH_ACTIVATE_DESC_FIELD: description,
+        }
+        token = _csrf_token(page)  # firmware >= 1.0.0.44; empty on older
+        if token:
+            changes["CSRFToken"] = token
+        body = _cheetah_replay(_cheetah_form(page, "/a1"), changes)
         resp = await self._request(f"{_CHEETAH_DUAL_IMAGE_PATH}/a1", data=body)
         reason = _cheetah_field_value(resp, "err_msg").strip()
         if reason:
             raise NetgearError(f"Could not activate {slot}: {reason}")
 
     async def _async_reboot(self) -> None:
-        """Reboot the switch via the Device Reboot form."""
+        """Reboot the switch via the Device Reboot form.
+
+        Preflight (fetching the form, its token, building the body) runs
+        outside the try so a failure there propagates — otherwise the caller
+        would wait out the whole reboot timeout for a reboot never requested.
+        Only the final POST is expected to fail, because the switch drops the
+        connection as it goes down; that dropped POST is the success signal.
+        """
+        page = await self._request(_CHEETAH_REBOOT_PATH)
+        changes = {
+            _CHEETAH_REBOOT_CONFIRM_FIELD: _CHEETAH_CHECKED,
+            # "Reset Unit" — the actual reboot trigger; the confirm checkbox
+            # alone does not restart the switch.
+            _CHEETAH_REBOOT_UNIT_FIELD: _CHEETAH_REBOOT_UNIT_ON,
+        }
+        token = _csrf_token(page)  # firmware >= 1.0.0.44; empty on older
+        if token:
+            changes["CSRFToken"] = token
+        body = _cheetah_replay(_cheetah_form(page, "/a1"), changes)
+        self._logged_in = False
         try:
-            html = _cheetah_form(await self._request(_CHEETAH_REBOOT_PATH), "/a1")
-            body = _cheetah_replay(
-                html, {_CHEETAH_REBOOT_CONFIRM_FIELD: _CHEETAH_CHECKED}
-            )
-            await self._request(f"{_CHEETAH_REBOOT_PATH}/a1", data=body)
+            resp = await self._request(f"{_CHEETAH_REBOOT_PATH}/a1", data=body)
         except NetgearError:
             # The switch drops the connection as it goes down: that IS success.
             _LOGGER.debug("Reboot request did not answer (expected)", exc_info=True)
-        self._logged_in = False
+            return
+        # A complete reply means the reboot was refused; surface it rather than
+        # leaving the caller to sit out the whole reboot timeout.
+        reason = _cheetah_field_value(resp, "err_msg").strip()
+        if reason:
+            raise NetgearError(f"Switch refused to reboot: {reason}")
 
     async def async_install_firmware(
         self,

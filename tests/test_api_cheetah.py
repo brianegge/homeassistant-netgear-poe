@@ -7,12 +7,15 @@ the port's ``g<n>`` label always in column 1. Identifiers are fake.
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from custom_components.netgear_poe.api import NetgearError
 from custom_components.netgear_poe.api_base_ui import NetgearCheetahApi
+
+# A firmware version string (dotted quad, but not an IP address).
+NEW_FW = "1.0.0.44"  # NOSONAR
 
 
 def _cell(index: int, col: int, value: str, count: int = 24) -> str:
@@ -244,10 +247,46 @@ UPLOAD_FORM_HTML = (
     "<html><body>"
     "<FORM method=post ENCTYPE='multipart/form-data' "
     'ACTION="/http_file_download.html/a1">'
+    # Write-only fields render empty: the switch expects its own JS to fill
+    # them back in from xeData before submitting.
+    '<INPUT xid=1_1_3 TYPE=hidden NAME=v_1_1_3 VALUE="">'
     '<INPUT xid=1_10_1 TYPE=hidden NAME=v_1_10_1 VALUE="Code">'
     '<INPUT xid=1_2_2 TYPE=hidden NAME=v_1_2_2 VALUE="image1">'
     '<INPUT xid=1_3_1 TYPE=file NAME=".v_1_3_1_handle" VALUE="">'
     '<INPUT xid=1_3_2 TYPE=hidden NAME=v_1_3_2 VALUE=" not in progress">'
+    '<INPUT xid=1_3_4 TYPE=hidden NAME=v_1_3_4 VALUE="">'
+    '<INPUT xid=1_9_1 TYPE=hidden NAME=v_1_9_1 VALUE="">'
+    '<INPUT xid=1_9_2 TYPE=hidden NAME=v_1_9_2 VALUE="">'
+    '<INPUT TYPE="hidden" NAME="submit_flag" VALUE="0">'
+    '<INPUT TYPE="hidden" NAME="err_msg" VALUE="">'
+    "</FORM></body></html>"
+)
+
+# The Dual Image Configuration form. The checkbox (v_4_3_1) is the UI; the
+# switch reads the hidden "Active Image" (v_4_3_2) and the description.
+ACTIVATE_FORM_HTML = (
+    "<html><body>"
+    '<FORM method=post ACTION="/dualImageConfiguration.html/a1">'
+    '<INPUT xid=4_1_2 TYPE=hidden NAME=v_4_1_2 VALUE="1">'
+    '<INPUT xid=4_1_1 TYPE=hidden NAME=v_4_1_1 VALUE="image1">'
+    '<INPUT xid=4_5_1 TYPE=hidden NAME=v_4_5_1 VALUE="image1">'
+    '<INPUT xid=4_2_1 TYPE=hidden NAME=v_4_2_1 VALUE="">'
+    '<INPUT xid=4_3_1 TYPE=hidden NAME=v_4_3_1 VALUE="">'
+    '<INPUT xid=4_3_2 TYPE=hidden NAME=v_4_3_2 VALUE="">'
+    '<INPUT xid=4_4_1 TYPE=hidden NAME=v_4_4_1 VALUE="">'
+    '<INPUT TYPE="hidden" NAME="submit_flag" VALUE="0">'
+    '<INPUT TYPE="hidden" NAME="err_msg" VALUE="">'
+    "</FORM></body></html>"
+)
+
+# The Device Reboot form. The confirm checkbox (v_1_2_1) is the UI; the switch
+# reboots on the hidden "Reset Unit" (v_1_1_2).
+REBOOT_FORM_HTML = (
+    "<html><body>"
+    '<FORM method=post ACTION="/deviceReboot.html/a1">'
+    '<INPUT xid=1_1_1 TYPE=hidden NAME=v_1_1_1 VALUE="1">'
+    '<INPUT xid=1_1_2 TYPE=hidden NAME=v_1_1_2 VALUE="">'
+    '<INPUT xid=1_2_1 TYPE=hidden NAME=v_1_2_1 VALUE="">'
     '<INPUT TYPE="hidden" NAME="submit_flag" VALUE="0">'
     '<INPUT TYPE="hidden" NAME="err_msg" VALUE="">'
     "</FORM></body></html>"
@@ -300,6 +339,48 @@ def test_cheetah_form_scopes_to_the_target_form() -> None:
     assert body["v_1_10_1"] == "Code"  # a1's own field is still there
 
 
+async def test_upload_firmware_posts_the_fields_that_start_the_flash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The upload must reproduce the exact field set the switch's UI posts.
+
+    Confirmed against a packet capture of a successful browser upload: File
+    Type is the label "Code" (not the enum index), the destination slot goes
+    in v_1_9_1 (v_1_2_2 is only a UI helper), the file name is echoed into
+    v_1_3_4, and "HTTP Download Start" (v_1_9_2=1) begins the flash. Get any
+    of these wrong and the switch takes all 26 MB, answers with a misleading
+    error or none at all, and writes nothing — so this asserts the real
+    posted body, not the helper.
+    """
+    api = _api(
+        {
+            "http_file_download": UPLOAD_FORM_HTML,
+            "dualImageStatus": IMAGE_STATUS_HTML,
+        }
+    )
+    session = MagicMock()
+    posted = session.post.return_value.__aenter__.return_value
+    posted.text = AsyncMock(return_value=UPLOAD_FORM_HTML)  # err_msg is empty
+    api._get_session = MagicMock(return_value=session)
+    monkeypatch.setattr(
+        "custom_components.netgear_poe.api_base_ui.asyncio.sleep", AsyncMock()
+    )
+
+    # image2 already holds this version, so the first poll sees it landed.
+    await api._async_upload_firmware(b"stk-bytes", "fw.stk", "image2", NEW_FW)
+
+    form = session.post.call_args.kwargs["data"]
+    values = {options["name"]: value for options, _headers, value in form._fields}
+    assert values["v_1_9_2"] == "1"  # HTTP Download Start — the trigger
+    assert values["v_1_1_3"] == "HTTP"  # Transfer Mode
+    assert values["v_1_10_1"] == "Code"  # File Type as the LABEL, not an index
+    assert values["v_1_9_1"] == "image2"  # the real destination slot
+    assert values["v_1_2_2"] == "image2"  # UI-helper copy of the slot
+    assert values["v_1_3_4"] == "fw.stk"  # file name echoed back
+    assert values[".v_1_3_1_handle"] == b"stk-bytes"
+    assert values["submit_flag"] == "8"
+
+
 def test_cheetah_form_missing_raises() -> None:
     """A page without the expected form is an error, not a silent no-op."""
     from custom_components.netgear_poe.api_base_ui import _cheetah_form
@@ -330,10 +411,9 @@ def test_cheetah_replay_forces_apply_and_applies_changes() -> None:
     """The replay posts every field, changes the asked-for ones, applies."""
     from custom_components.netgear_poe.api_base_ui import _cheetah_replay
 
-    body = _cheetah_replay(UPLOAD_FORM_HTML, {"v_1_10_1": "0", "v_1_2_2": "image2"})
-    # File type posts the enum INDEX; posting the label "Code" is rejected.
-    assert body["v_1_10_1"] == "0"
-    # The image-name combo is a string, so the slot name posts as-is.
+    body = _cheetah_replay(UPLOAD_FORM_HTML, {"v_1_10_1": "Code", "v_1_2_2": "image2"})
+    # Every requested change is echoed verbatim into the replayed body.
+    assert body["v_1_10_1"] == "Code"
     assert body["v_1_2_2"] == "image2"
     # submit_flag 8 = apply; the form's own 0 only re-renders the page.
     assert body["submit_flag"] == "8"
@@ -348,3 +428,124 @@ async def test_transfer_in_progress_reads_the_flag() -> None:
     assert await _api({"http_file_download": busy})._async_transfer_in_progress()
     idle = _api({"http_file_download": UPLOAD_FORM_HTML})
     assert not await idle._async_transfer_in_progress()
+
+
+async def test_activate_image_posts_the_hidden_trigger() -> None:
+    """Activating a slot must set the hidden "Active Image" field, not just
+    tick the checkbox.
+
+    Confirmed against a packet capture: the switch reads v_4_3_2="TRUE" (and
+    the description); posting only the visible checkbox is a silent no-op that
+    leaves next-active unchanged.
+    """
+    api = _api({"dualImageConfiguration": ACTIVATE_FORM_HTML})
+    await api._async_activate_image("image2", NEW_FW)
+
+    post = [c for c in api._request.call_args_list if c.kwargs.get("data")][-1]
+    path, body = post.args[0], post.kwargs["data"]
+    assert path == "/dualImageConfiguration.html/a1"
+    assert body["v_4_1_1"] == "image2"  # the slot
+    assert body["v_4_3_2"] == "TRUE"  # the hidden trigger the switch reads
+    assert body["v_4_2_1"] == NEW_FW  # description carries the version
+    assert body["v_4_3_1"] == "Enable"  # the checkbox, checked
+    assert body["submit_flag"] == "8"
+
+
+async def test_reboot_posts_the_reset_unit_trigger() -> None:
+    """Rebooting must set "Reset Unit" (v_1_1_2=1), not just the confirm box."""
+    api = _api({"deviceReboot": REBOOT_FORM_HTML})
+    await api._async_reboot()
+
+    post = [c for c in api._request.call_args_list if c.kwargs.get("data")][-1]
+    path, body = post.args[0], post.kwargs["data"]
+    assert path == "/deviceReboot.html/a1"
+    assert body["v_1_1_2"] == "1"  # Reset Unit — the real trigger
+    assert body["v_1_2_1"] == "Enable"  # confirm checkbox, checked
+    assert body["submit_flag"] == "8"
+
+
+LOGIN_PAGE_WITH_CSRF = (
+    '<html><body><FORM ACTION="/base/cheetah_login.html">'
+    '<INPUT type=hidden NAME="CSRFToken" VALUE="abc123deadbeef">'
+    '<INPUT type=password NAME="pwd" VALUE="">'
+    "</FORM></body></html>"
+)
+
+
+async def test_login_sends_csrf_token_when_present() -> None:
+    """Firmware >= 1.0.0.44 stamps a CSRFToken the login POST must echo.
+
+    Without it the switch grants a SID and then bounces every later request to
+    the login page — so the token, taken from the GET of the form, has to ride
+    on the credential POST.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    def ctx(text: str) -> MagicMock:
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.text = AsyncMock(return_value=text)
+        c = MagicMock()
+        c.__aenter__ = AsyncMock(return_value=resp)
+        c.__aexit__ = AsyncMock(return_value=False)
+        return c
+
+    session = MagicMock()
+    session.get = MagicMock(return_value=ctx(LOGIN_PAGE_WITH_CSRF))
+    session.post = MagicMock(return_value=ctx("<html>ok</html>"))
+    session.cookie_jar = [MagicMock(key="SID")]
+    api = NetgearCheetahApi("host", "pw", session=session)
+
+    await api.async_login()
+
+    posted = session.post.call_args.kwargs["data"]
+    assert posted["CSRFToken"] == "abc123deadbeef"
+    assert posted["submt"] == "16"  # the cheetah login field still rides along
+
+
+async def test_activate_image_carries_csrf_token() -> None:
+    """A state-changing POST must echo the page's CSRF token (it lives outside
+    the target form, so the replay would otherwise drop it)."""
+    page = ACTIVATE_FORM_HTML.replace(
+        "<html><body>",
+        '<html><body><INPUT type=hidden NAME="CSRFToken" VALUE="tok-9f">',
+    )
+    api = _api({"dualImageConfiguration": page})
+    await api._async_activate_image("image2", NEW_FW)
+
+    post = [c for c in api._request.call_args_list if c.kwargs.get("data")][-1]
+    assert post.kwargs["data"]["CSRFToken"] == "tok-9f"
+
+
+async def test_reboot_propagates_preflight_errors() -> None:
+    """A failure fetching or parsing the reboot form must not look like a
+    successful reboot — otherwise the install flow waits out the whole reboot
+    timeout for a reboot that was never requested (CodeRabbit #9)."""
+    api = _api({"deviceReboot": "<html>Access Denied</html>"})  # no /a1 form
+    with pytest.raises(NetgearError, match="Could not find"):
+        await api._async_reboot()
+
+
+async def test_reboot_treats_dropped_post_as_success() -> None:
+    """The switch drops the connection as it goes down; only THAT is success."""
+
+    async def fake_request(path: str, data: dict[str, str] | None = None) -> str:
+        if data is None:  # GET the form
+            return REBOOT_FORM_HTML
+        raise NetgearError("Connection lost")  # the POST, as the switch reboots
+
+    api = _api()
+    api._request = AsyncMock(side_effect=fake_request)
+    await api._async_reboot()  # must not raise
+    assert api._logged_in is False
+
+
+async def test_reboot_surfaces_a_refusal() -> None:
+    """A complete reply carrying an error means the reboot was refused."""
+    refused = REBOOT_FORM_HTML.replace(
+        'NAME="err_msg" VALUE=""', 'NAME="err_msg" VALUE="Reboot not allowed"'
+    )
+    api = _api()
+    api._request = AsyncMock(return_value=refused)
+    with pytest.raises(NetgearError, match="refused to reboot"):
+        await api._async_reboot()
