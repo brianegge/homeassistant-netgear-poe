@@ -4,6 +4,15 @@ The GS728TPv2 (firmware 6.x) exposes a JSON CGI API at /cgi/get.cgi and
 /cgi/set.cgi. Authentication posts an obfuscated password to
 cmd=home_loginAuth, then all writes carry an RSA-encrypted session token in
 the X-CSRF-XSID header. Protocol reference: https://github.com/tai/gs310tp
+
+Two login handshakes exist across firmware revisions. Older firmware (e.g.
+GS310TP 1.0.1.x) treats home_loginAuth as establishing the session and returns
+the session token from a follow-up GET home_loginStatus. Newer firmware (e.g.
+GS310TP 1.0.5.x, GS728TPPv3 6.2.x) instead returns an authId from
+home_loginAuth and expects it POSTed back to home_loginStatus to obtain the
+token. Newer firmware also renamed the request-integrity query parameter from
+hash to bj4; async_login detects which the switch wants and both drivers reuse
+the same md5(query) value.
 """
 
 from __future__ import annotations
@@ -154,6 +163,9 @@ class NetgearPoeApi:
         # detection records which so every request uses the right scheme.
         self.use_https = use_https
         self._scheme = "https" if use_https else "http"
+        # The query-integrity parameter name: newer firmware wants "bj4", older
+        # accepts either; async_login falls back to "hash" if "bj4" is rejected.
+        self._hash_param = "bj4"
         self._xsid_header: str | None = None
         self._login_lock = asyncio.Lock()
         self._port_names: dict[int, str] = {}
@@ -175,7 +187,10 @@ class NetgearPoeApi:
     def _url(self, cgi: str, cmd: str) -> str:
         query = f"cmd={cmd}&dummy={int(time.time() * 1000)}"
         checksum = md5(query.encode()).hexdigest()
-        return f"{self._scheme}://{self.host}/cgi/{cgi}?{query}&hash={checksum}"
+        return (
+            f"{self._scheme}://{self.host}/cgi/{cgi}"
+            f"?{query}&{self._hash_param}={checksum}"
+        )
 
     async def _request(
         self, cgi: str, cmd: str, body: str | None = None
@@ -201,26 +216,55 @@ class NetgearPoeApi:
             raise NetgearError(f"Request {cmd} failed: {err}") from err
 
     async def async_login(self) -> None:
-        """Authenticate and store the CSRF session header."""
+        """Authenticate and store the CSRF session header.
+
+        Handles both firmware login handshakes (see the module docstring): the
+        password post returns either a ready session or an authId that must be
+        posted back. The follow-up loops because the switch can take a moment
+        to mark the session ready.
+        """
         self._xsid_header = None
-        result = await self._request(
-            "set.cgi",
-            "home_loginAuth",
-            form_body({"pwd": encode_password(self._password)}),
-        )
+        result = await self._login_auth()
         if result.get("status") != "ok":
             raise NetgearAuthError(f"Login rejected: {result}")
+        # Newer firmware returns an authId to hand back to home_loginStatus;
+        # older firmware establishes the session here and answers a plain GET.
+        auth_id = result.get("authId")
 
         for _ in range(5):
-            status = await self._request("get.cgi", "home_loginStatus")
+            if auth_id:
+                status = await self._request(
+                    "set.cgi",
+                    "home_loginStatus",
+                    form_body({"authId": auth_id, "xsrf": "undefined"}),
+                )
+            else:
+                status = await self._request("get.cgi", "home_loginStatus")
             data = status.get("data", {})
             if data.get("status") == "ok" and data.get("sess"):
                 sess = b64decode(data["sess"]).decode()
                 tabid, expo, modulus = sess[:32], sess[32:37], sess[37:-1]
                 self._xsid_header = rsa_encrypt(tabid, expo, modulus)
                 return
+            if str(data.get("status", "")).lower() == "fail":
+                raise NetgearAuthError("Login failed (wrong password?)")
             await asyncio.sleep(1)
         raise NetgearAuthError("Login failed: no session granted (wrong password?)")
+
+    async def _login_auth(self) -> dict[str, Any]:
+        """Post the password, tolerating the two request-parameter spellings.
+
+        Newer firmware rejects the legacy "hash" query parameter (400); older
+        firmware accepts either. Try the modern "bj4" first, and on the one
+        switch generation that wants "hash", flip once and cache the result so
+        every later request uses the spelling that works.
+        """
+        body = form_body({"pwd": encode_password(self._password)})
+        try:
+            return await self._request("set.cgi", "home_loginAuth", body)
+        except NetgearError:
+            self._hash_param = "hash" if self._hash_param == "bj4" else "bj4"
+            return await self._request("set.cgi", "home_loginAuth", body)
 
     async def _authed_request(
         self, cgi: str, cmd: str, body: str | None = None
@@ -420,7 +464,9 @@ class NetgearPoeApi:
         if self._xsid_header is None:
             return
         try:
-            await self._request("set.cgi", "home_logout", form_body({}))
+            await self._request(
+                "set.cgi", "home_logout", form_body({"empty": 1, "xsrf": "undefined"})
+            )
         except NetgearError:
             _LOGGER.debug("Logout request failed", exc_info=True)
         self._xsid_header = None
