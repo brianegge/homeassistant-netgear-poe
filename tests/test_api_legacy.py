@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiohttp
 import pytest
 
 from custom_components.netgear_poe.api import (
@@ -330,6 +331,82 @@ async def test_detect_api_modern() -> None:
     ):
         api = await async_detect_api("h", "pw")
     assert isinstance(api, NetgearPoeApi)
+    # A plain-HTTP switch stays HTTP; no needless HTTPS probe or flag.
+    assert api.use_https is False
+
+
+def _mock_multi_session(responses: list[object]) -> MagicMock:
+    """A session whose get() yields each response in turn.
+
+    Each item is either (location, body) or the string "error" to make that
+    probe raise a connection error — enough to drive the HTTP-then-HTTPS probe.
+    """
+    ctxs = []
+    for item in responses:
+        ctx = MagicMock()
+        if item == "error":
+            ctx.__aenter__ = AsyncMock(side_effect=aiohttp.ClientError("refused"))
+        else:
+            location, body = item  # type: ignore[misc]
+            resp = MagicMock()
+            resp.headers = {"Location": location} if location else {}
+            resp.text = AsyncMock(return_value=body)
+            ctx.__aenter__ = AsyncMock(return_value=resp)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        ctxs.append(ctx)
+    session = MagicMock()
+    session.get = MagicMock(side_effect=ctxs)
+    session.close = AsyncMock()
+    return session
+
+
+async def test_detect_api_https_redirect() -> None:
+    """A switch that redirects HTTP->HTTPS is re-probed over HTTPS and flagged."""
+    session = _mock_multi_session(
+        [
+            ("https://h/", ""),  # HTTP probe: forced-HTTPS redirect
+            (None, "<html><body>login</body></html>"),  # HTTPS probe: JSON UI
+        ]
+    )
+    api = await async_detect_api("h", "pw", session=session)
+    assert isinstance(api, NetgearPoeApi)
+    assert api.use_https is True
+
+
+async def test_detect_api_https_only() -> None:
+    """A switch that refuses HTTP entirely is still detected over HTTPS."""
+    session = _mock_multi_session(
+        [
+            "error",  # HTTP probe: connection refused
+            (None, '<FORM ACTION="/base/cheetah_login.html">'),  # HTTPS: cheetah
+        ]
+    )
+    api = await async_detect_api("h", "pw", session=session)
+    assert isinstance(api, NetgearCheetahApi)
+    assert api.use_https is True
+
+
+async def test_detect_api_https_legacy_prefix() -> None:
+    """An HTTPS switch can still be the legacy xui backend."""
+    session = _mock_multi_session(
+        [
+            ("https://h/", ""),  # HTTP: forced-HTTPS redirect
+            ("https://h/csb555f027/index.htm", ""),  # HTTPS: /csb<hex>/ prefix
+        ]
+    )
+    api = await async_detect_api("h", "pw", session=session)
+    assert isinstance(api, NetgearLegacyApi)
+    assert api.use_https is True
+    assert api._prefix == "csb555f027"
+
+
+async def test_detect_api_https_url_uses_scheme() -> None:
+    """The detected HTTPS flag makes the client build https:// URLs."""
+    session = _mock_multi_session(
+        [("https://h/", ""), (None, "<html>login</html>")]
+    )
+    api = await async_detect_api("h", "pw", session=session)
+    assert api._url("cgi", "cmd").startswith("https://h/")
 
 
 IMAGE_LIST_XML = """<?xml version="1.0" encoding="UTF-8" ?>

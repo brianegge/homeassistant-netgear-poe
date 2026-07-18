@@ -26,7 +26,10 @@ class NetgearPoeEntity(CoordinatorEntity[NetgearPoeCoordinator]):
             manufacturer="Netgear",
             model=entry.runtime_data.model or None,
             sw_version=entry.runtime_data.firmware or None,
-            configuration_url=f"http://{coordinator.api.host}/",
+            configuration_url=(
+                f"http{'s' if getattr(coordinator.api, 'use_https', False) else ''}"
+                f"://{coordinator.api.host}/"
+            ),
         )
 
 

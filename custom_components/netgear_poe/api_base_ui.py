@@ -45,6 +45,7 @@ from .api import (
     PoeData,
     PoePort,
     SwitchInfo,
+    _insecure_connector,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -245,11 +246,16 @@ class NetgearBaseUiApi:
         host: str,
         password: str,
         session: aiohttp.ClientSession | None = None,
+        use_https: bool = False,
     ) -> None:
         self.host = host
         self._password = password
         self._session = session
         self._owns_session = session is None
+        # HTTPS-configured switches redirect HTTP to it; detection records the
+        # scheme so every request uses the right one.
+        self.use_https = use_https
+        self._scheme = "https" if use_https else "http"
         self._logged_in = False
         self._login_lock = asyncio.Lock()
         self._port_names: dict[int, str] = {}
@@ -266,12 +272,13 @@ class NetgearBaseUiApi:
             self._session = aiohttp.ClientSession(
                 cookie_jar=aiohttp.CookieJar(unsafe=True),
                 timeout=aiohttp.ClientTimeout(total=15),
+                # HTTPS switches present a self-signed certificate.
+                connector=_insecure_connector() if self.use_https else None,
             )
         return self._session
 
     def _url(self, path: str) -> str:
-        # These switches serve plain HTTP only; they have no TLS support.
-        return f"http://{self.host}{path}"  # NOSONAR
+        return f"{self._scheme}://{self.host}{path}"
 
     # The login form's location and its exact field set. Subclasses for
     # later firmware (the S350 "cheetah" UI) override these: the switch

@@ -23,6 +23,16 @@ import aiohttp
 _LOGGER = logging.getLogger(__name__)
 
 
+def _insecure_connector() -> aiohttp.TCPConnector:
+    """A connector for HTTPS switches, which present a self-signed certificate.
+
+    The management interface is on the local network and identified by IP, so
+    certificate verification would only ever fail on the self-signed cert;
+    disabling it is what a browser reaching this UI does too.
+    """
+    return aiohttp.TCPConnector(ssl=False)
+
+
 class NetgearError(Exception):
     """Request to the switch failed."""
 
@@ -134,11 +144,16 @@ class NetgearPoeApi:
         host: str,
         password: str,
         session: aiohttp.ClientSession | None = None,
+        use_https: bool = False,
     ) -> None:
         self.host = host
         self._password = password
         self._session = session
         self._owns_session = session is None
+        # Some switches are configured to force HTTPS (and redirect HTTP to it);
+        # detection records which so every request uses the right scheme.
+        self.use_https = use_https
+        self._scheme = "https" if use_https else "http"
         self._xsid_header: str | None = None
         self._login_lock = asyncio.Lock()
         self._port_names: dict[int, str] = {}
@@ -152,13 +167,15 @@ class NetgearPoeApi:
             self._session = aiohttp.ClientSession(
                 cookie_jar=aiohttp.CookieJar(unsafe=True),
                 timeout=aiohttp.ClientTimeout(total=15),
+                # These switches present a self-signed certificate over HTTPS.
+                connector=_insecure_connector() if self.use_https else None,
             )
         return self._session
 
     def _url(self, cgi: str, cmd: str) -> str:
         query = f"cmd={cmd}&dummy={int(time.time() * 1000)}"
         checksum = md5(query.encode()).hexdigest()
-        return f"http://{self.host}/cgi/{cgi}?{query}&hash={checksum}"
+        return f"{self._scheme}://{self.host}/cgi/{cgi}?{query}&hash={checksum}"
 
     async def _request(
         self, cgi: str, cmd: str, body: str | None = None
