@@ -1287,24 +1287,37 @@ class NetgearCheetahApi(NetgearBaseUiApi):
             raise NetgearError(f"Could not activate {slot}: {reason}")
 
     async def _async_reboot(self) -> None:
-        """Reboot the switch via the Device Reboot form."""
+        """Reboot the switch via the Device Reboot form.
+
+        Preflight (fetching the form, its token, building the body) runs
+        outside the try so a failure there propagates — otherwise the caller
+        would wait out the whole reboot timeout for a reboot never requested.
+        Only the final POST is expected to fail, because the switch drops the
+        connection as it goes down; that dropped POST is the success signal.
+        """
+        page = await self._request(_CHEETAH_REBOOT_PATH)
+        changes = {
+            _CHEETAH_REBOOT_CONFIRM_FIELD: _CHEETAH_CHECKED,
+            # "Reset Unit" — the actual reboot trigger; the confirm checkbox
+            # alone does not restart the switch.
+            _CHEETAH_REBOOT_UNIT_FIELD: _CHEETAH_REBOOT_UNIT_ON,
+        }
+        token = _csrf_token(page)  # firmware >= 1.0.0.44; empty on older
+        if token:
+            changes["CSRFToken"] = token
+        body = _cheetah_replay(_cheetah_form(page, "/a1"), changes)
+        self._logged_in = False
         try:
-            page = await self._request(_CHEETAH_REBOOT_PATH)
-            changes = {
-                _CHEETAH_REBOOT_CONFIRM_FIELD: _CHEETAH_CHECKED,
-                # "Reset Unit" — the actual reboot trigger; the confirm
-                # checkbox alone does not restart the switch.
-                _CHEETAH_REBOOT_UNIT_FIELD: _CHEETAH_REBOOT_UNIT_ON,
-            }
-            token = _csrf_token(page)  # firmware >= 1.0.0.44; empty on older
-            if token:
-                changes["CSRFToken"] = token
-            body = _cheetah_replay(_cheetah_form(page, "/a1"), changes)
-            await self._request(f"{_CHEETAH_REBOOT_PATH}/a1", data=body)
+            resp = await self._request(f"{_CHEETAH_REBOOT_PATH}/a1", data=body)
         except NetgearError:
             # The switch drops the connection as it goes down: that IS success.
             _LOGGER.debug("Reboot request did not answer (expected)", exc_info=True)
-        self._logged_in = False
+            return
+        # A complete reply means the reboot was refused; surface it rather than
+        # leaving the caller to sit out the whole reboot timeout.
+        reason = _cheetah_field_value(resp, "err_msg").strip()
+        if reason:
+            raise NetgearError(f"Switch refused to reboot: {reason}")
 
     async def async_install_firmware(
         self,

@@ -14,6 +14,9 @@ import pytest
 from custom_components.netgear_poe.api import NetgearError
 from custom_components.netgear_poe.api_base_ui import NetgearCheetahApi
 
+# A firmware version string (dotted quad, but not an IP address).
+NEW_FW = "1.0.0.44"  # NOSONAR
+
 
 def _cell(index: int, col: int, value: str, count: int = 24) -> str:
     return (
@@ -364,7 +367,7 @@ async def test_upload_firmware_posts_the_fields_that_start_the_flash(
     )
 
     # image2 already holds this version, so the first poll sees it landed.
-    await api._async_upload_firmware(b"stk-bytes", "fw.stk", "image2", "1.0.0.44")
+    await api._async_upload_firmware(b"stk-bytes", "fw.stk", "image2", NEW_FW)
 
     form = session.post.call_args.kwargs["data"]
     values = {options["name"]: value for options, _headers, value in form._fields}
@@ -436,14 +439,14 @@ async def test_activate_image_posts_the_hidden_trigger() -> None:
     leaves next-active unchanged.
     """
     api = _api({"dualImageConfiguration": ACTIVATE_FORM_HTML})
-    await api._async_activate_image("image2", "1.0.0.44")
+    await api._async_activate_image("image2", NEW_FW)
 
     post = [c for c in api._request.call_args_list if c.kwargs.get("data")][-1]
     path, body = post.args[0], post.kwargs["data"]
     assert path == "/dualImageConfiguration.html/a1"
     assert body["v_4_1_1"] == "image2"  # the slot
     assert body["v_4_3_2"] == "TRUE"  # the hidden trigger the switch reads
-    assert body["v_4_2_1"] == "1.0.0.44"  # description = version
+    assert body["v_4_2_1"] == NEW_FW  # description carries the version
     assert body["v_4_3_1"] == "Enable"  # the checkbox, checked
     assert body["submit_flag"] == "8"
 
@@ -508,7 +511,41 @@ async def test_activate_image_carries_csrf_token() -> None:
         '<html><body><INPUT type=hidden NAME="CSRFToken" VALUE="tok-9f">',
     )
     api = _api({"dualImageConfiguration": page})
-    await api._async_activate_image("image2", "1.0.0.44")
+    await api._async_activate_image("image2", NEW_FW)
 
     post = [c for c in api._request.call_args_list if c.kwargs.get("data")][-1]
     assert post.kwargs["data"]["CSRFToken"] == "tok-9f"
+
+
+async def test_reboot_propagates_preflight_errors() -> None:
+    """A failure fetching or parsing the reboot form must not look like a
+    successful reboot — otherwise the install flow waits out the whole reboot
+    timeout for a reboot that was never requested (CodeRabbit #9)."""
+    api = _api({"deviceReboot": "<html>Access Denied</html>"})  # no /a1 form
+    with pytest.raises(NetgearError, match="Could not find"):
+        await api._async_reboot()
+
+
+async def test_reboot_treats_dropped_post_as_success() -> None:
+    """The switch drops the connection as it goes down; only THAT is success."""
+
+    async def fake_request(path: str, data: dict[str, str] | None = None) -> str:
+        if data is None:  # GET the form
+            return REBOOT_FORM_HTML
+        raise NetgearError("Connection lost")  # the POST, as the switch reboots
+
+    api = _api()
+    api._request = AsyncMock(side_effect=fake_request)
+    await api._async_reboot()  # must not raise
+    assert api._logged_in is False
+
+
+async def test_reboot_surfaces_a_refusal() -> None:
+    """A complete reply carrying an error means the reboot was refused."""
+    refused = REBOOT_FORM_HTML.replace(
+        'NAME="err_msg" VALUE=""', 'NAME="err_msg" VALUE="Reboot not allowed"'
+    )
+    api = _api()
+    api._request = AsyncMock(return_value=refused)
+    with pytest.raises(NetgearError, match="refused to reboot"):
+        await api._async_reboot()
