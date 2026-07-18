@@ -57,8 +57,12 @@ type NetgearAnyApi = (
 # time, and every xui switch on a network answers with the same one at any
 # given moment, so it can't be cached across logins (async_login re-reads it).
 # Matching only "csbe" + digits, as this once did, works by luck: it needs the
-# hex to start with 'e' and carry no a-f after it.
-_PREFIX_RE = re.compile(r"/(csb[0-9a-f]+)/", re.I)
+# hex to start with 'e' and carry no a-f after it. And "csb" + hex was STILL
+# too narrow — the 'b' was itself the first hex digit both times it was seen.
+# Observed prefixes: csbe116353, csb555f027 (GS516TP), cs6fc955c0 (GS728TP) —
+# the marker is "cs" followed by 8 hex chars (allow fewer in case the value
+# is ever formatted without zero-padding).
+_PREFIX_RE = re.compile(r"/(cs[0-9a-f]{4,8})/", re.I)
 _BASE_UI_RE = re.compile(r"/base/main_login\.html", re.I)
 # The S350 "cheetah" firmware posts its login to a different page.
 _CHEETAH_RE = re.compile(r"/base/cheetah_login\.html", re.I)

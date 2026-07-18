@@ -261,18 +261,20 @@ async def test_detect_api_legacy() -> None:
 @pytest.mark.parametrize(
     "prefix",
     [
-        "csb555f027",  # real: hex with letters after "csb" — the common case
-        "csbe116353",  # real: happens to be "csbe" + digits
+        "csb555f027",  # real GS516TP: the 'b' is itself the first hex digit
+        "csbe116353",  # real GS516TP: happens to read as "csbe" + digits
         "csbE116353",  # same, upper case
+        "cs6fc955c0",  # real GS728TP: no 'b' at all — the marker is just "cs"
         "csb0a1b2c3",
     ],
 )
 async def test_detect_api_legacy_accepts_any_hex_prefix(prefix: str) -> None:
-    """The prefix is "csb" + hex, not "csbe" + digits.
+    """The prefix is "cs" + hex — not "csb" + hex, not "csbe" + digits.
 
     It is recomputed rather than fixed per device, so a switch that answered
-    "csbe116353" once can answer "csb555f027" later; matching only the digit
-    form silently misroutes the switch to the JSON client.
+    "csbe116353" once can answer "csb555f027" later — and a GS728TP answers
+    "cs6fc955c0" with no 'b' at all. Every narrower pattern silently misroutes
+    the switch to the JSON client.
     """
     session = _mock_session(f"http://h/{prefix}/index.htm")  # NOSONAR — mock
     api = await async_detect_api("h", "pw", session=session)
