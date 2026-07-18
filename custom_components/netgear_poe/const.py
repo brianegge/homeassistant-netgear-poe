@@ -86,6 +86,19 @@ LATEST_FIRMWARE: Final[dict[str, FirmwareRelease]] = {
         ),
         notes_url="https://kb.netgear.com/000062485/GS516TP-Firmware-Version-6-0-1-30",
     ),
+    # GS308T / GS310TP (S350 hardware answering the JSON CGI API, which has no
+    # install path — this entry only surfaces "update available" with notes).
+    "1.3.6.1.4.1.4526.100.4.53": FirmwareRelease(
+        version="1.0.5.12",
+        url=(
+            "https://www.downloads.netgear.com/files/GDC/GS308T/"
+            "GS308T_GS310TP_V1.0.5.12.zip"
+        ),
+        notes_url=(
+            "https://kb.netgear.com/000065851/"
+            "GS308T-GS310TP-Firmware-Version-1-0-5-12"
+        ),
+    ),
     # GS324T / GS324TP (S350). Netgear ships one image for both, from the
     # GS324T directory.
     "1.3.6.1.4.1.4526.100.4.55": FirmwareRelease(

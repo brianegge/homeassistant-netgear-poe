@@ -394,15 +394,25 @@ class NetgearPoeApi:
         )
 
     async def async_get_info(self) -> SwitchInfo:
-        """Return the switch's name, model and firmware version."""
+        """Return the switch's name, model and firmware version.
+
+        Models sharing this JSON CGI API name the fields differently: the
+        GS728TPv2 sends fwVer/sysObjectID, the GS310TP txtSwVer/sysObjectOid
+        (and a plain txtVerModelName alongside the lang()-wrapped sysProduct).
+        Read both spellings so neither generation reports blanks.
+        """
         result = await self._authed_request("get.cgi", "sys_info")
         data = result.get("data", {})
-        model = _parse_lang_key(str(data.get("sysProduct", "")), "txtModelDescp")
+        model = _parse_lang_key(
+            str(data.get("sysProduct", "")), "txtModelDescp"
+        ) or str(data.get("txtVerModelName", ""))
         return SwitchInfo(
             name=str(data.get("sysName", "")),
             model=model,
-            firmware=str(data.get("fwVer", "")),
-            sys_object_id=str(data.get("sysObjectID", "")).lstrip("."),
+            firmware=str(data.get("fwVer") or data.get("txtSwVer") or ""),
+            sys_object_id=str(
+                data.get("sysObjectID") or data.get("sysObjectOid") or ""
+            ).lstrip("."),
         )
 
     async def async_logout(self) -> None:

@@ -132,6 +132,32 @@ async def test_get_info_without_firmware() -> None:
     assert info.firmware == ""
 
 
+async def test_get_info_gs310tp_field_spellings() -> None:
+    """The GS310TP names the same facts differently; both spellings work.
+
+    It sends txtSwVer (not fwVer), sysObjectOid (not sysObjectID) and a plain
+    txtVerModelName — reading only the GS728TPv2 names left firmware and
+    sysObjectID blank, which also broke LATEST_FIRMWARE lookups.
+    """
+    api = NetgearPoeApi("host", "pw")
+    api._authed_request = AsyncMock(
+        return_value={
+            "data": {
+                "sysName": "office-switch",
+                "sysProduct": "lang('login','txtModelDescpGS310TP')",
+                "txtVerModelName": "GS310TP",
+                "txtSwVer": "1.0.1.2",
+                "sysObjectOid": "1.3.6.1.4.1.4526.100.4.53",
+            }
+        }
+    )
+
+    info = await api.async_get_info()
+    assert info.model == "GS310TP"
+    assert info.firmware == "1.0.1.2"
+    assert info.sys_object_id == "1.3.6.1.4.1.4526.100.4.53"
+
+
 PORT_PORT_RESPONSE = {
     "data": {
         "ports": [
