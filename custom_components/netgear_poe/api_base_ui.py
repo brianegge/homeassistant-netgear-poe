@@ -360,6 +360,11 @@ class NetgearBaseUiApi:
         # descriptions is loaded and empty, not unloaded.
         self._port_names_loaded = False
         self._poll_count = 0
+        # None until the first poll settles it: some models (the non-PoE
+        # GS108Tv2) serve an empty PoE page. An empty page is treated as
+        # "no PoE ports" only before any have been seen; once a switch has
+        # shown ports, a later empty page is a real error, not a model change.
+        self._has_poe: bool | None = None
         # Fetch port names from port_cfg.html; disabled when SNMP (ifAlias) is
         # the name source, to avoid an extra page fetch per refresh.
         self.web_port_names_enabled = True
@@ -564,11 +569,21 @@ class NetgearBaseUiApi:
         )
 
     async def async_get_data(self) -> PoeData:
-        """Fetch PoE state for all ports."""
+        """Fetch PoE state for all ports.
+
+        A non-PoE model (e.g. the GS108Tv2) serves an empty PoE page; that is a
+        valid switch with no PoE, returned as empty data so it can still carry
+        a firmware-update entity. Once a switch has shown ports, though, an
+        empty page is a genuine failure and is raised.
+        """
         html = await self._request("/base/poe/poe_port_cfg.html")
         rows = _port_rows(html, ("Port", "Admin Mode", "Status"))
         if not rows:
-            raise NetgearError("No PoE ports in poe_port_cfg response")
+            if self._has_poe:
+                raise NetgearError("No PoE ports in poe_port_cfg response")
+            self._has_poe = False
+            return PoeData()
+        self._has_poe = True
 
         await self._async_refresh_port_names()
         self._poll_count += 1

@@ -330,9 +330,25 @@ async def test_get_data_keeps_names_when_refresh_fails() -> None:
     assert data.ports[1].alias == "cached cam"
 
 
-async def test_get_data_without_ports_raises() -> None:
-    """A page with no port rows is an error, not an empty result."""
-    api = _api({"poe_port_cfg": "<html><body>Access Denied</body></html>"})
+async def test_get_data_no_ports_first_read_is_a_nonpoe_switch() -> None:
+    """An empty PoE page on the first read is a non-PoE model, not an error.
+
+    The GS108Tv2 serves an empty PoE page; it is a valid switch with no PoE,
+    so it returns empty data (and still gets a firmware-update entity) rather
+    than failing setup.
+    """
+    api = _api({"poe_port_cfg": "<html><body></body></html>"})
+    data = await api.async_get_data()
+    assert data.ports == {}
+    assert data.consumption_watts is None
+
+
+async def test_get_data_empty_after_ports_seen_raises() -> None:
+    """Once ports have been seen, a later empty page is a genuine failure."""
+    api = _api()
+    first = await api.async_get_data()
+    assert first.ports  # a normal PoE switch
+    api._request = AsyncMock(return_value="<html><body></body></html>")
     with pytest.raises(NetgearError, match="No PoE ports"):
         await api.async_get_data()
 

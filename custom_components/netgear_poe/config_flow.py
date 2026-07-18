@@ -25,13 +25,16 @@ USER_SCHEMA = vol.Schema(
 
 
 async def _validate_connection(host: str, password: str) -> str:
-    """Log in, verify PoE ports exist, and return a title. Raises on failure."""
+    """Log in, read the switch, and return a title. Raises on failure.
+
+    A successful get_data with no ports is fine — a non-PoE model like the
+    GS108Tv2 still gets a firmware-update entity — so only a login or
+    connection failure blocks setup, not the absence of PoE.
+    """
     api = await async_detect_api(host=host, password=password)
     try:
         info = await api.async_get_info()
-        data = await api.async_get_data()
-        if not data.ports:
-            raise NetgearError("No PoE ports found")
+        await api.async_get_data()
         return info.name or info.model or host
     finally:
         await api.async_close()
