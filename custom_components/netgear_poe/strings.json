@@ -83,6 +83,11 @@
     }
   },
   "entity": {
+    "binary_sensor": {
+      "poe_controller_stalled": {
+        "name": "PoE controller stalled"
+      }
+    },
     "sensor": {
       "poe_power": {
         "name": "PoE power"
