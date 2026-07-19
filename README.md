@@ -111,6 +111,16 @@ directory (or add this repository to HACS as a custom repository), restart
 Home Assistant, then add the **Netgear PoE Switch** integration with the
 switch hostname and admin password.
 
+## Removal
+
+To remove a switch, go to **Settings → Devices & Services**, open the
+**Netgear PoE Switch** integration, and use the three-dot menu on the entry to
+**Delete** it. That removes the entry and all of its entities; the integration
+logs out of the switch as it unloads, so no session or trap registration is
+left behind on the switch. To remove the integration entirely, delete every
+entry and then remove the `custom_components/netgear_poe` directory (or the
+HACS repository) and restart Home Assistant.
+
 ## Discovery (NSDP)
 
 The integration can auto-discover switches on the local subnet using

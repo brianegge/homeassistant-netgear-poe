@@ -1,0 +1,120 @@
+rules:
+  # Bronze
+  action-setup:
+    status: exempt
+    comment: >
+      The integration registers no domain-level service actions in async_setup.
+      The one action it provides, set_port_name, is an entity service registered
+      with async_register_entity_service on the switch platform.
+  appropriate-polling: done
+  brands:
+    status: todo
+    comment: >
+      Icon assets are staged under brand/. They still need to be submitted to
+      the home-assistant/brands repository before this rule is complete.
+  common-modules: done
+  config-flow: done
+  config-flow-test-coverage: done
+  dependency-transparency: done
+  docs-actions: done
+  docs-conditions:
+    status: exempt
+    comment: The integration provides no conditions.
+  docs-high-level-description: done
+  docs-installation-instructions: done
+  docs-removal-instructions: done
+  docs-triggers:
+    status: exempt
+    comment: The integration provides no triggers.
+  entity-event-setup: done
+  entity-unique-id: done
+  has-entity-name: done
+  runtime-data: done
+  test-before-configure: done
+  test-before-setup: done
+  unique-config-entry: done
+
+  # Silver
+  action-exceptions:
+    status: todo
+    comment: >
+      Firmware install raises HomeAssistantError; set_port_name's error paths
+      need an audit to guarantee they surface as HA exceptions.
+  config-entry-unloading: done
+  docs-configuration-parameters:
+    status: todo
+    comment: The config/reconfigure options are not yet documented individually.
+  docs-installation-parameters:
+    status: todo
+    comment: Host/password/community/traps setup fields are not yet documented.
+  entity-unavailable: done
+  integration-owner: done
+  log-when-unavailable:
+    status: todo
+    comment: Needs a once-only log when the switch becomes unreachable.
+  parallel-updates:
+    status: todo
+    comment: >
+      PARALLEL_UPDATES is set on the switch, sensor, binary_sensor and button
+      platforms; the update platform still needs it.
+  reauthentication-flow: done
+  test-coverage:
+    status: todo
+    comment: Overall test coverage has not been measured against the >95% bar.
+
+  # Gold
+  devices:
+    status: todo
+    comment: Entities are not yet grouped under a device registry entry.
+  diagnostics: done
+  discovery: done
+  discovery-update-info: done
+  docs-data-update:
+    status: todo
+  docs-examples: done
+  docs-known-limitations:
+    status: todo
+  docs-supported-devices: done
+  docs-supported-functions: done
+  docs-troubleshooting:
+    status: todo
+  docs-use-cases: done
+  dynamic-devices:
+    status: exempt
+    comment: A switch is a single static device; there are no dynamically added devices.
+  entity-category:
+    status: todo
+  entity-device-class:
+    status: todo
+    comment: >
+      The link binary sensor uses connectivity and the power sensor uses power;
+      remaining entities need a class review.
+  entity-disabled-by-default:
+    status: todo
+  entity-translations:
+    status: todo
+  exception-translations:
+    status: todo
+  icon-translations: done
+  reconfiguration-flow: done
+  repair-issues:
+    status: todo
+    comment: >
+      Candidate: a repair issue for the forced-password-change / CSRF states
+      some firmware enters. Not yet implemented.
+  stale-devices:
+    status: exempt
+    comment: A single-device integration removes its device when the entry is deleted.
+
+  # Platinum
+  async-dependency:
+    status: todo
+    comment: The protocol code is embedded and fully async; not yet a separate PyPI dependency.
+  inject-websession:
+    status: todo
+    comment: >
+      The clients create their own aiohttp session (with an insecure connector
+      for self-signed HTTPS) rather than accepting an injected one.
+  strict-typing:
+    status: todo
+    comment: py.typed is shipped; a strict mypy pass has not been enforced.
