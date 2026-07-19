@@ -44,12 +44,17 @@ from .api import (
     _insecure_connector,
 )
 from .api_base_ui import NetgearBaseUiApi, NetgearCheetahApi
+from .api_json_v2 import NetgearJsonV2Api
 
 _LOGGER = logging.getLogger(__name__)
 
 # Any of the interchangeable per-generation clients async_detect_api returns.
 type NetgearAnyApi = (
-    NetgearPoeApi | NetgearLegacyApi | NetgearBaseUiApi | NetgearCheetahApi
+    NetgearPoeApi
+    | NetgearJsonV2Api
+    | NetgearLegacyApi
+    | NetgearBaseUiApi
+    | NetgearCheetahApi
 )
 
 # The per-request path prefix: "csb" followed by hex, e.g. /csb555f027/.
@@ -66,6 +71,10 @@ _PREFIX_RE = re.compile(r"/(cs[0-9a-f]{4,8})/", re.I)
 _BASE_UI_RE = re.compile(r"/base/main_login\.html", re.I)
 # The S350 "cheetah" firmware posts its login to a different page.
 _CHEETAH_RE = re.compile(r"/base/cheetah_login\.html", re.I)
+# The redesigned JSON-CGI UI (GS728TPPv3 6.2.x) bootstraps its root page to
+# login.html?aj4=<ms>&bj4=md5(query); the aj4 asset-version parameter does
+# not appear in the older JSON-CGI firmware's root page.
+_AJ4_RE = re.compile(r"login\.html\?aj4=", re.I)
 _LOGIN_OK_CODES = {"0", "9", "10", "12", "13", "14"}
 _DETECTION_STATUS = {
     "1": "disabled",
@@ -637,7 +646,9 @@ async def async_detect_api(
     * Legacy xui (GS516TP) 302-redirects to its per-device /csbe<id>/ prefix.
     * The classic /base/ UI (GS110TP) serves a login form posting to
       /base/main_login.html.
-    * The newer JSON-CGI firmware serves its own login page directly.
+    * The redesigned JSON-CGI UI (GS728TPPv3 6.2.x) serves a bootstrap page
+      that jumps to login.html?aj4=<ms>&bj4=md5(query).
+    * The older JSON-CGI firmware serves its own login page directly.
     """
     timeout = aiohttp.ClientTimeout(total=10)
     probe_session = session or aiohttp.ClientSession(timeout=timeout)
@@ -661,6 +672,10 @@ async def async_detect_api(
         )
     if _BASE_UI_RE.search(body):
         return NetgearBaseUiApi(
+            host=host, password=password, session=session, use_https=use_https
+        )
+    if _AJ4_RE.search(body):
+        return NetgearJsonV2Api(
             host=host, password=password, session=session, use_https=use_https
         )
     return NetgearPoeApi(

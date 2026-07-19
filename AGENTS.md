@@ -17,6 +17,7 @@ homeassistant-netgear-poe/
 │   └── netgear_poe/
 │       ├── __init__.py          # Coordinator, setup, NSDP discovery, trap wiring
 │       ├── api.py               # NetgearPoeApi: JSON CGI client (login, poe_port)
+│       ├── api_json_v2.py       # NetgearJsonV2Api: redesigned "aj4" JSON CGI UI
 │       ├── api_legacy.py        # NetgearLegacyApi: xui XML + async_detect_api
 │       ├── api_base_ui.py       # NetgearBaseUiApi: classic /base/ HTML UI
 │       ├── snmp.py              # SnmpLinkMonitor: ifOperStatus + ifAlias walks
@@ -44,16 +45,26 @@ homeassistant-netgear-poe/
 
 ## Firmware generations
 
-Four incompatible web UIs are in the wild. `async_detect_api` (in
+Five incompatible web UIs are in the wild. `async_detect_api` (in
 `api_legacy.py`) probes `GET /` once and picks the client; all expose the
 same interface, so everything above them is generation-agnostic.
 
 | Client | Firmware / models | Detected by |
 | --- | --- | --- |
 | `NetgearPoeApi` | JSON CGI (GS728TPv2, GS3xx) | none of the below |
+| `NetgearJsonV2Api` | redesigned "aj4" JSON CGI (GS728TPPv3, 6.2.x) | `login.html?aj4=` in body |
 | `NetgearLegacyApi` | xui XML (GS516TP, 6.0.x) | 302 → `/csb<hex>/` |
 | `NetgearBaseUiApi` | classic HTML (GS110TP, 5.4.x) | `/base/main_login.html` in body |
 | `NetgearCheetahApi` | S350 EmWeb (GS324TP, 1.0.x) | `/base/cheetah_login.html` in body |
+
+`NetgearJsonV2Api` subclasses `NetgearPoeApi` (same CGI endpoints, commands
+and `bj4=md5(query)` URL hashes). What differs, reverse-engineered from the
+switch's own login.html/home.html/js: the b64 session decodes with the
+modulus running to the end of the blob (the older firmware drops a trailing
+byte), `home_loginAuth` only signals a bad password with `status: "error"`,
+and every `set.cgi` body carries a rotating `xsrf` token — seeded from
+`home_home`'s `data.xsrf` after login and refreshed from any response
+carrying an `xsrf` field (a stale token gets a logout/invalidCsrf answer).
 
 `NetgearCheetahApi` subclasses `NetgearBaseUiApi` (shared FASTPATH login,
 Referer-on-every-request). Its probe branch runs **before** the `/base/` one
