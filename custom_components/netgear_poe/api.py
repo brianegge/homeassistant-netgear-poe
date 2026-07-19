@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import secrets
 import time
 from base64 import b64decode, b64encode
@@ -30,7 +31,7 @@ from urllib.parse import quote
 
 import aiohttp
 
-from ._upload import _multipart_upload_body, _ProgressUpload
+from ._upload import _multipart_upload_body
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -41,6 +42,14 @@ _SET_CGI = "set.cgi"
 # Firmware install. The switch writes flash while the upload POST is in flight
 # and then reports progress only as coarse state strings, so the byte upload
 # drives the progress bar and the flash-write phase is polled without a percent.
+# The image is POSTed to a bare httpupload.cgi (no query string);
+# get.cgi?cmd=file_http_download is only the precheck. The directory varies by
+# model — GS310TP uses /cgi-bin/httpupload.cgi, GS728TPPv3 /cgi/httpupload.cgi —
+# so the path is read from the switch's own upload form (see _async_upload_path).
+_DEFAULT_UPLOAD_PATH = "/cgi-bin/httpupload.cgi"
+_UPLOAD_FORM_PAGE = "html/maintain_download_http.html"
+_UPLOAD_PATH_RE = re.compile(r"""["'](/[^"']*httpupload\.cgi)["']""")
+
 _FIRMWARE_UPLOAD_TIMEOUT = 600
 _DOWNLOAD_STATUS_POLL_SECONDS = 3
 # 600 s / 3 s: a flash write can take several minutes on these switches.
@@ -193,6 +202,8 @@ class NetgearPoeApi:
         # accepts either; async_login falls back to "hash" if "bj4" is rejected.
         self._hash_param = "bj4"
         self._xsid_header: str | None = None
+        # Firmware-upload CGI path; probed from the switch's form on first use.
+        self._upload_path: str | None = None
         self._login_lock = asyncio.Lock()
         self._port_names: dict[int, str] = {}
         self._poll_count = 0
@@ -540,6 +551,26 @@ class NetgearPoeApi:
         result = await self._authed_request(_GET_CGI, "file_dualStatus")
         return _parse_dual_status(result)
 
+    async def _async_upload_path(self) -> str:
+        """The httpupload.cgi path this switch uses, read from its upload form.
+
+        The directory varies by model (/cgi-bin vs /cgi), so rather than guess,
+        read the form's upload action once and cache it. On any trouble reading
+        the page, fall back to the GS310TP default.
+        """
+        if self._upload_path is None:
+            self._upload_path = _DEFAULT_UPLOAD_PATH
+            try:
+                url = f"{self._scheme}://{self.host}/{_UPLOAD_FORM_PAGE}"
+                async with self._get_session().get(url) as resp:
+                    resp.raise_for_status()
+                    match = _UPLOAD_PATH_RE.search(await resp.text())
+                    if match:
+                        self._upload_path = match.group(1)
+            except (aiohttp.ClientError, TimeoutError):
+                _LOGGER.debug("Could not read %s; using default upload path", url)
+        return self._upload_path
+
     async def _async_upload_firmware(
         self,
         image: bytes,
@@ -550,34 +581,37 @@ class NetgearPoeApi:
 
         Posted directly rather than through _request: the body is multipart and
         the switch writes flash while reading it, so it needs its own generous
-        timeout. imgName is the constant "1" — the switch chooses the inactive
-        slot itself (see async_install_firmware, which verifies where it landed
-        before doing anything irreversible). The byte upload drives the bar
-        (20..60); the flash-write phase reports only state strings, so it is
-        polled without moving the bar further.
+        timeout. imgName is the constant "1" — a "standby image" indicator, not
+        a slot number; the switch writes the inactive slot itself (imgName="2"
+        is rejected as an invalid image). async_install_firmware then verifies
+        where the image actually landed before doing anything irreversible.
+        xsrf is the literal string the form carries (the real token is the
+        X-CSRF-XSID header).
+
+        The body is sent in one shot rather than chunk-streamed with progress:
+        this switch resets the connection ("cannot write request body") on a
+        streamed HTTPS upload, so the bar holds at its pre-upload value until
+        the upload returns. `progress` is accepted for interface parity.
         """
-        # Field order mirrors the switch's own upload form. The None marks the
-        # file part. xsrf here is the literal string the form carries; the real
-        # token is the X-CSRF-XSID header, added below.
         fields: list[tuple[str, str | None]] = [
             ("fileType", "0"),
             ("xsrf", "undefined"),
             ("imgName", "1"),
             ("fileName", None),
         ]
+        url = f"{self._scheme}://{self.host}{await self._async_upload_path()}"
         body, content_type = _multipart_upload_body(fields, filename, image)
-        payload = _ProgressUpload(body, content_type, progress, 20, 40)
-
         headers = {
             "X-Requested-With": "XMLHttpRequest",
             "Referer": f"{self._scheme}://{self.host}/",
+            "Content-Type": content_type,
         }
         if self._xsid_header:
             headers["X-CSRF-XSID"] = self._xsid_header
         try:
             async with self._get_session().post(
-                self._url(_SET_CGI, "file_http_download"),
-                data=payload,
+                url,
+                data=body,
                 headers=headers,
                 timeout=aiohttp.ClientTimeout(total=_FIRMWARE_UPLOAD_TIMEOUT),
             ) as resp:
@@ -684,27 +718,36 @@ class NetgearPoeApi:
             + (f" (last reported {observed})" if observed else "")
         )
 
-    async def _async_verify_staged(self, target: str, version: str) -> None:
-        """Fail-closed: confirm the upload landed in the inactive slot.
+    async def _async_verify_staged(self, version: str) -> None:
+        """Fail-closed: confirm some slot now holds the new version.
 
-        This backend's slot targeting was reverse-engineered from a packet
-        capture and is NOT verified against a live flash, so before anything
-        irreversible the image status is re-read and this raises unless the
-        expected inactive slot now holds the new version — a wrong-slot
-        assumption or an overwritten running image stops the install here.
+        Which physical slot the switch writes is not predictable — on one
+        GS310TP the image landed in the inactive slot, on another it overwrote
+        the active one — so this checks by version, not by slot. If the upload
+        reported success but neither slot reports the new version, it never got
+        stored; raise rather than activate or reboot.
         """
         staged = await self.async_get_image_status()
-        if staged.versions.get(target) != version:
+        if version not in staged.versions.values():
             raise NetgearError(
-                f"Upload finished but slot {target} reports "
-                f"{staged.versions.get(target) or 'nothing'}, expected {version}; "
-                "refusing to activate or reboot"
+                f"Upload finished but no slot reports {version} "
+                f"(slots: {staged.versions}); refusing to activate or reboot"
             )
 
-    async def _async_verify_boot_slot(self, target: str) -> None:
-        """Confirm activation moved the next-boot pointer to `target`."""
-        if (await self.async_get_image_status()).next_active != target:
-            raise NetgearError(f"Could not make {target} the boot image")
+    async def _async_verify_boot_slot(self, version: str) -> None:
+        """Confirm the switch will boot the new version next.
+
+        file_dualConf selects the slot by its version descriptor, so verify the
+        next-active slot actually holds `version` — an activation that silently
+        did nothing (or picked the wrong slot) stops here.
+        """
+        status = await self.async_get_image_status()
+        if status.versions.get(status.next_active) != version:
+            raise NetgearError(
+                f"Could not make the {version} image the boot image "
+                f"(next-active {status.next_active} holds "
+                f"{status.versions.get(status.next_active)})"
+            )
 
     async def async_install_firmware(
         self,
@@ -713,14 +756,16 @@ class NetgearPoeApi:
         filename: str,
         progress: Callable[[int], None] | None = None,
     ) -> None:
-        """Install a firmware image: upload, verify slot, activate, reboot.
+        """Install a firmware image: upload, verify, activate, reboot.
 
-        The switch writes the upload to the INACTIVE slot itself (imgName is a
-        constant "1"), so the running firmware stays flashed as a rollback. The
+        The switch writes the upload (imgName is the constant "1") and picks
+        the slot itself — usually the inactive one, but on some firmware it
+        overwrites the active slot, leaving the other slot as an older
+        rollback. Either way the checks are by version, not slot (see the
+        verify helpers), and are fail-closed: nothing irreversible happens
+        unless the new version is actually stored and set to boot next. The
         final reboot drops PoE — and the switch's own link — for around a
         minute. `version` must match what the image reports after flashing.
-        The slot and boot-pointer checks are fail-closed (see the verify
-        helpers): a wrong-slot assumption aborts before anything irreversible.
         """
 
         def report(percent: int) -> None:
@@ -728,30 +773,23 @@ class NetgearPoeApi:
                 progress(percent)
 
         before = await self.async_get_image_status()
-        target = before.inactive
         _LOGGER.info(
-            "Uploading firmware %s to %s slot %s (running %s from %s)",
+            "Uploading firmware %s to %s (running %s from %s)",
             version,
             self.host,
-            target,
             before.versions.get(before.current_active, "?"),
             before.current_active,
         )
         report(20)
         await self._async_upload_firmware(image, filename, progress)
-        await self._async_verify_staged(target, version)
+        await self._async_verify_staged(version)
         report(60)
 
         await self._async_activate_image(version)
-        await self._async_verify_boot_slot(target)
+        await self._async_verify_boot_slot(version)
         report(70)
 
-        _LOGGER.info(
-            "Rebooting %s into %s (%s); PoE will drop briefly",
-            self.host,
-            target,
-            version,
-        )
+        _LOGGER.info("Rebooting %s into %s; PoE will drop briefly", self.host, version)
         await self._async_reboot()
         report(80)
         await self._async_wait_for_firmware(version, progress)

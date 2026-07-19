@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiohttp
 import pytest
 
 from custom_components.netgear_poe.api import (
@@ -108,32 +109,72 @@ def _upload_session() -> MagicMock:
     return session
 
 
-async def test_upload_posts_multipart_with_xsid_then_polls() -> None:
-    """The upload posts file_http_download with the form's fields + XSID."""
+async def test_upload_posts_to_httpupload_cgi_then_polls() -> None:
+    """Upload posts the image to the bare httpupload.cgi with the slot in imgName."""
     session = _upload_session()
     api = NetgearPoeApi("host", "pw", session=session)
     api._xsid_header = "XSIDTOKEN"
+    api._upload_path = "/cgi-bin/httpupload.cgi"  # skip the form probe
     # The flash-write poll comes back done immediately.
     api._authed_request = AsyncMock(return_value={"data": {"status": "success"}})
 
     await api._async_upload_firmware(b"bix-bytes", "fw.bix")
 
     url = session.post.call_args.args[0]
-    assert "cmd=file_http_download" in url
+    assert url.endswith("/cgi-bin/httpupload.cgi")
+    assert "cmd=" not in url  # bare CGI, no query string
     headers = session.post.call_args.kwargs["headers"]
     assert headers["X-CSRF-XSID"] == "XSIDTOKEN"
     assert headers["X-Requested-With"] == "XMLHttpRequest"
 
-    fields = parse_upload_payload(session.post.call_args.kwargs["data"])
+    fields = parse_upload_payload(
+        session.post.call_args.kwargs["data"], headers["Content-Type"]
+    )
     names = [name for name, _ in fields]
     assert names == ["fileType", "xsrf", "imgName", "fileName"]
     values = dict(fields)
     assert values["fileType"] == "0"
     assert values["xsrf"] == "undefined"
+    # imgName is the constant "1" (a standby indicator); "2" is rejected.
     assert values["imgName"] == "1"
     assert values["fileName"] == b"bix-bytes"
     # The status poll ran.
     api._authed_request.assert_awaited_with("get.cgi", "file_http_downloadStatus")
+
+
+async def test_upload_path_read_from_form() -> None:
+    """The upload CGI directory (/cgi-bin vs /cgi) is read from the switch form."""
+
+    def session_serving(page: str) -> MagicMock:
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.text = AsyncMock(return_value=page)
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=resp)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        s = MagicMock()
+        s.get = MagicMock(return_value=ctx)
+        s.close = AsyncMock()
+        return s
+
+    gs310 = NetgearPoeApi(
+        "h", "pw", session=session_serving('action = "/cgi-bin/httpupload.cgi";')
+    )
+    assert await gs310._async_upload_path() == "/cgi-bin/httpupload.cgi"
+
+    gs728 = NetgearPoeApi(
+        "h", "pw", session=session_serving('action = "/cgi/httpupload.cgi";')
+    )
+    assert await gs728._async_upload_path() == "/cgi/httpupload.cgi"
+
+    # Unreadable form falls back to the GS310TP default.
+    broken = MagicMock()
+    broken.get = MagicMock(side_effect=aiohttp.ClientError("boom"))
+    broken.close = AsyncMock()
+    assert (
+        await NetgearPoeApi("h", "pw", session=broken)._async_upload_path()
+        == "/cgi-bin/httpupload.cgi"
+    )
 
 
 async def test_wait_for_upload_succeeds_after_uploading() -> None:
@@ -291,7 +332,7 @@ async def test_install_uploads_verifies_activates_reboots() -> None:
 
 
 async def test_install_stops_when_upload_not_recorded() -> None:
-    """If the inactive slot did not take the new version, do not proceed."""
+    """If neither slot took the new version, do not proceed."""
     api = NetgearPoeApi("host", "pw")
     unchanged = _dis("1.0.1.2", "1.0.0.9", "image1")
     api.async_get_image_status = AsyncMock(side_effect=[unchanged, unchanged])
@@ -299,11 +340,35 @@ async def test_install_stops_when_upload_not_recorded() -> None:
     api._async_activate_image = AsyncMock()
     api._async_reboot = AsyncMock()
 
-    with pytest.raises(NetgearError, match=r"expected 1\.0\.5\.12"):
+    with pytest.raises(NetgearError, match=r"no slot reports 1\.0\.5\.12"):
         await api.async_install_firmware(b"bix", "1.0.5.12", filename="fw.bix")
 
     api._async_activate_image.assert_not_awaited()
     api._async_reboot.assert_not_awaited()
+
+
+async def test_install_ok_when_image_lands_in_active_slot() -> None:
+    """Some firmware overwrites the ACTIVE slot; verify by version, not slot.
+
+    Running image2; the upload lands in image2 (active) and the other slot
+    keeps the older rollback. next-active already points at image2, so the
+    version-based guards pass and the install completes.
+    """
+    api = NetgearPoeApi("host", "pw")
+    api.async_get_image_status = AsyncMock(
+        side_effect=[
+            _dis("1.0.0.9", "1.0.1.2", "image2", "image2"),  # before
+            _dis("1.0.0.9", "1.0.5.12", "image2", "image2"),  # after upload
+            _dis("1.0.0.9", "1.0.5.12", "image2", "image2"),  # after activate
+        ]
+    )
+    api._async_upload_firmware = AsyncMock()
+    api._async_activate_image = AsyncMock()
+    api._async_reboot = AsyncMock()
+    api._async_wait_for_firmware = AsyncMock()
+
+    await api.async_install_firmware(b"bix", "1.0.5.12", filename="fw.bix")
+    api._async_reboot.assert_awaited_once()
 
 
 async def test_install_stops_when_activation_did_not_stick() -> None:
