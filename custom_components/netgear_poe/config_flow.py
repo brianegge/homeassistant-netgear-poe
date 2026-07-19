@@ -23,20 +23,17 @@ from .const import (
     TRAP_MODE_LOCAL,
     TRAP_MODES,
 )
+from .mqtt_traps import async_discover_bridge_host
 
-_TRAP_SCHEMA = {
-    vol.Optional(CONF_TRAP_MODE, default=TRAP_MODE_LOCAL): vol.In(TRAP_MODES),
-    vol.Optional(CONF_TRAP_BRIDGE_HOST, default=""): str,
-}
 
-USER_SCHEMA = vol.Schema(
-    {
-        vol.Required(CONF_HOST): str,
-        vol.Required(CONF_PASSWORD): str,
-        vol.Optional(CONF_COMMUNITY, default=""): str,
-        **_TRAP_SCHEMA,
+def _trap_schema(
+    trap_mode_default: str = TRAP_MODE_LOCAL, bridge_host_default: str = ""
+) -> dict:
+    """Trap-mode + bridge-host fields, with a runtime-resolved bridge default."""
+    return {
+        vol.Optional(CONF_TRAP_MODE, default=trap_mode_default): vol.In(TRAP_MODES),
+        vol.Optional(CONF_TRAP_BRIDGE_HOST, default=bridge_host_default): str,
     }
-)
 
 
 async def _validate_connection(host: str, password: str) -> str:
@@ -61,6 +58,18 @@ class NetgearPoeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
 
     _discovered: dict[str, Any]
+    _bridge_host: str | None = None
+
+    async def _async_bridge_default(self) -> str:
+        """The bridge's advertised trap-destination IP, or "" — resolved once.
+
+        Prefills CONF_TRAP_BRIDGE_HOST so the switch's trap recipient can be
+        set automatically when an snmptrap2mqtt bridge is on the network; the
+        field stays editable and empties gracefully when no bridge answers.
+        """
+        if self._bridge_host is None:
+            self._bridge_host = await async_discover_bridge_host(self.hass) or ""
+        return self._bridge_host
 
     async def _async_validate(
         self, user_input: dict[str, Any], errors: dict[str, str]
@@ -88,9 +97,15 @@ class NetgearPoeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._abort_if_unique_id_configured()
                 return self.async_create_entry(title=title, data=user_input)
 
-        return self.async_show_form(
-            step_id="user", data_schema=USER_SCHEMA, errors=errors
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_HOST): str,
+                vol.Required(CONF_PASSWORD): str,
+                vol.Optional(CONF_COMMUNITY, default=""): str,
+                **_trap_schema(bridge_host_default=await self._async_bridge_default()),
+            }
         )
+        return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
 
     async def async_step_integration_discovery(
         self, discovery_info: dict[str, Any]
@@ -168,7 +183,9 @@ class NetgearPoeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 {
                     vol.Required(CONF_PASSWORD): str,
                     vol.Optional(CONF_COMMUNITY, default=""): str,
-                    **_TRAP_SCHEMA,
+                    **_trap_schema(
+                        bridge_host_default=await self._async_bridge_default()
+                    ),
                 }
             ),
             description_placeholders={
@@ -238,7 +255,8 @@ class NetgearPoeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     ): vol.In(TRAP_MODES),
                     vol.Optional(
                         CONF_TRAP_BRIDGE_HOST,
-                        default=reconfigure_entry.data.get(CONF_TRAP_BRIDGE_HOST, ""),
+                        default=reconfigure_entry.data.get(CONF_TRAP_BRIDGE_HOST)
+                        or await self._async_bridge_default(),
                     ): str,
                 }
             ),

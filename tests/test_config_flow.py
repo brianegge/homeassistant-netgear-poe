@@ -2,17 +2,27 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
+import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.netgear_poe.api import NetgearAuthError, NetgearError
-from custom_components.netgear_poe.const import DOMAIN
+from custom_components.netgear_poe.const import CONF_TRAP_BRIDGE_HOST, DOMAIN
 
 from .conftest import MOCK_CONFIG, MOCK_SYS_NAME
+
+
+def _schema_default(schema: vol.Schema, key_name: str) -> object:
+    """Extract the default value voluptuous will render for a field."""
+    for key in schema.schema:
+        if getattr(key, "schema", None) == key_name:
+            default = key.default
+            return default() if callable(default) else default
+    raise KeyError(key_name)
 
 
 async def test_user_flow_success(hass: HomeAssistant, mock_api: MagicMock) -> None:
@@ -29,6 +39,35 @@ async def test_user_flow_success(hass: HomeAssistant, mock_api: MagicMock) -> No
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["title"] == MOCK_SYS_NAME
     assert result["data"] == MOCK_CONFIG
+
+
+async def test_user_flow_prefills_bridge_host(
+    hass: HomeAssistant, mock_api: MagicMock
+) -> None:
+    """An advertised bridge address prefills the trap-host field."""
+    with patch(
+        "custom_components.netgear_poe.config_flow.async_discover_bridge_host",
+        return_value="192.168.1.4",
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+    assert result["type"] is FlowResultType.FORM
+    assert _schema_default(result["data_schema"], CONF_TRAP_BRIDGE_HOST) == "192.168.1.4"
+
+
+async def test_user_flow_bridge_host_empty_without_bridge(
+    hass: HomeAssistant, mock_api: MagicMock
+) -> None:
+    """With no bridge on MQTT the field stays empty (manual entry)."""
+    with patch(
+        "custom_components.netgear_poe.config_flow.async_discover_bridge_host",
+        return_value=None,
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+    assert _schema_default(result["data_schema"], CONF_TRAP_BRIDGE_HOST) == ""
 
 
 async def test_user_flow_accepts_switch_with_no_poe_ports(

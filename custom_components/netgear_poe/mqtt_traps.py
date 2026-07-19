@@ -9,6 +9,7 @@ also fixes the multi-switch ambiguity the local receiver has.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import socket
@@ -38,6 +39,43 @@ def _resolve_ip(host: str) -> str | None:
         return socket.gethostbyname(host)
     except OSError:
         return None
+
+
+async def async_discover_bridge_host(
+    hass: HomeAssistant, base_topic: str = DEFAULT_TRAP_TOPIC, timeout: float = 3.0
+) -> str | None:
+    """Read the bridge's advertised trap-destination IP from retained MQTT.
+
+    The snmptrap2mqtt daemon publishes its routable listener address to
+    <base>/bridge/info; reading it lets the config flow prefill the trap host
+    instead of asking. Returns None if MQTT is unavailable, no bridge has
+    published, or the address field is absent — the caller then falls back to
+    an empty (manually entered) default.
+    """
+    if not await mqtt.async_wait_for_mqtt_client(hass):
+        return None
+
+    address: str | None = None
+    got = asyncio.Event()
+
+    @callback
+    def _on_info(msg: mqtt.ReceiveMessage) -> None:
+        nonlocal address
+        try:
+            address = json.loads(msg.payload).get("listener", {}).get("address")
+        except (ValueError, AttributeError):
+            return
+        got.set()
+
+    unsub = await mqtt.async_subscribe(hass, f"{base_topic}/bridge/info", _on_info)
+    try:
+        async with asyncio.timeout(timeout):
+            await got.wait()
+    except TimeoutError:
+        pass
+    finally:
+        unsub()
+    return address
 
 
 async def async_setup_mqtt_traps(
