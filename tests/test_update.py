@@ -132,6 +132,17 @@ def test_extract_image_passes_through_raw_stk() -> None:
     assert image == b"raw-stk-bytes"
 
 
+def test_extract_image_from_zip_bix() -> None:
+    """The JSON CGI (GS310TP-class) firmware ships a .bix in the zip."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("GS308T_310TP_1.0.5.12.bix", b"NGC5-IMAGE")
+        archive.writestr("Release_Notes.html", b"<html>notes</html>")
+    filename, image = _extract_image(buffer.getvalue(), "https://x/fw.zip")
+    assert filename == "GS308T_310TP_1.0.5.12.bix"
+    assert image == b"NGC5-IMAGE"
+
+
 def test_extract_image_rejects_non_zip_from_a_zip_url() -> None:
     """An error page served 200 for a .zip URL must never reach the switch.
 
