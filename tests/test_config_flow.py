@@ -53,7 +53,8 @@ async def test_user_flow_prefills_bridge_host(
             DOMAIN, context={"source": config_entries.SOURCE_USER}
         )
     assert result["type"] is FlowResultType.FORM
-    assert _schema_default(result["data_schema"], CONF_TRAP_BRIDGE_HOST) == "192.168.1.4"
+    default = _schema_default(result["data_schema"], CONF_TRAP_BRIDGE_HOST)
+    assert default == "192.168.1.4"
 
 
 async def test_user_flow_bridge_host_empty_without_bridge(
