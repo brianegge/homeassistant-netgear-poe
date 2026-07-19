@@ -34,12 +34,12 @@ function gotoLogin()
 </body>
 </html>"""
 
-# A session blob as this firmware hands it back: 32-char tabid, exponent
-# 10001, and the modulus running to the very end (home.html slices
-# substring(37, sess.length) — there is no trailing byte to drop).
+# A session blob as this firmware hands it back (observed live on a
+# GS728TPPv3 V6.2.0.36): 32-char tabid, exponent 10001, 256 hex chars of
+# modulus, and a terminating C-string NUL that is not part of the key.
 _MODULUS = "d" * 255 + "7"
 _TABID = "A" * 32
-_SESS = b64encode((_TABID + "10001" + _MODULUS).encode()).decode()
+_SESS = b64encode((_TABID + "10001" + _MODULUS + "\x00").encode()).decode()
 
 
 def _mock_session(body: str) -> MagicMock:
@@ -97,18 +97,20 @@ def test_form_body_replaces_stub_xsrf_in_place() -> None:
     assert body == '{"_ds=1&authId=a&xsrf=tok1&_de=1":{}}'
 
 
-def test_parse_sess_keeps_whole_modulus() -> None:
-    """The modulus runs to the end of the session blob (no [-1] drop)."""
+def test_parse_sess_strips_non_hex_from_modulus() -> None:
+    """The modulus is the blob's remainder with non-hex bytes stripped.
+
+    The live switch terminates the blob with a C-string NUL; jsbn (which
+    home.html feeds the raw remainder) skips non-hex characters, so the
+    parse must too rather than assuming exactly one byte of trailing junk.
+    """
     api = NetgearJsonV2Api("host", "pw")
-    tabid, expo, modulus = api._parse_sess(_TABID + "10001" + _MODULUS)
+    tabid, expo, modulus = api._parse_sess(_TABID + "10001" + _MODULUS + "\x00")
     assert tabid == _TABID
     assert expo == "10001"
     assert modulus == _MODULUS
-    # The base class parse would truncate it and corrupt the RSA key.
-    assert (
-        NetgearPoeApi("host", "pw")._parse_sess(_TABID + "10001" + _MODULUS)[2]
-        == _MODULUS[:-1]
-    )
+    # A blob without any trailing junk must not lose the modulus's last char.
+    assert api._parse_sess(_TABID + "10001" + _MODULUS)[2] == _MODULUS
 
 
 async def test_login_flow_and_xsrf_lifecycle() -> None:

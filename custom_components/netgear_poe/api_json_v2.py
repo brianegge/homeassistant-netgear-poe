@@ -14,9 +14,12 @@ from the switch's own login.html, home.html, js/utility.js and js/url.js
   as a rejected password, so this driver does the same instead of
   requiring status == "ok".
 * The b64-decoded session splits tabid[0:32] + exponent[32:37] +
-  modulus[37:] (home.html: sess.substring(37, sess.length)). The older
-  firmware's parser drops a trailing byte; keeping that here would
-  truncate the RSA modulus and break the X-CSRF-XSID header.
+  modulus[37:] (home.html: sess.substring(37, sess.length)), and the blob
+  ends with a C-string NUL after the modulus (observed live). jsbn's
+  parser skips non-hex characters, so the modulus here is the remainder
+  with non-hex bytes stripped — not a fixed [:-1] drop like the older
+  firmware's parser, which happens to match today only because the junk
+  is exactly one byte.
 * Every set.cgi body carries an xsrf token (utility.js formDataGet()
   appends xsrf=<id> to each form). It starts as the literal "null"
   (login.html: var xsrfId = null), the real value arrives in home_home's
@@ -54,8 +57,16 @@ class NetgearJsonV2Api(NetgearPoeApi):
         return form_body({**fields, "xsrf": self._xsrf})
 
     def _parse_sess(self, sess: str) -> tuple[str, str, str]:
-        """The modulus is the whole remainder — no trailing byte to drop."""
-        return sess[:32], sess[32:37], sess[37:]
+        """The modulus is the remainder of the blob, minus any non-hex bytes.
+
+        A real GS728TPPv3 V6.2.0.36 terminates the blob with a C-string NUL
+        after the 256 hex chars of the modulus. home.html feeds the whole
+        remainder to jsbn, whose parser silently skips non-hex characters —
+        so mirror that instead of assuming a fixed amount of trailing junk
+        (the base class's [:-1] and this NUL agree today, but only by luck).
+        """
+        modulus = "".join(c for c in sess[37:] if c in "0123456789abcdefABCDEF")
+        return sess[:32], sess[32:37], modulus
 
     def _login_auth_ok(self, result: dict[str, Any]) -> bool:
         """login.html only checks for status == "error", not for "ok"."""
