@@ -31,6 +31,10 @@ import aiohttp
 
 _LOGGER = logging.getLogger(__name__)
 
+# The two CGI endpoints every command goes through (reads vs. writes).
+_GET_CGI = "get.cgi"
+_SET_CGI = "set.cgi"
+
 
 def _insecure_connector() -> aiohttp.TCPConnector:
     """A connector for HTTPS switches, which present a self-signed certificate.
@@ -230,13 +234,23 @@ class NetgearPoeApi:
 
         Generation detection falls through to this client for any web UI it
         doesn't recognize, so NSDP discovery calls this to confirm the CGI
-        actually answers before offering the switch for setup.
+        actually answers before offering the switch for setup. The two login
+        dialects expose different unauthenticated reads (verified on real
+        switches): newer firmware (GS728TPPv3 6.2.x, GS310TP 1.0.2.x)
+        answers GET home_login with bj4, older firmware (GS310TP 1.0.0.x)
+        answers GET home_loginStatus with hash — each 4xx/5xxes the other.
         """
         try:
-            await self._request("get.cgi", "home_loginStatus")
+            await self._request(_GET_CGI, "home_login")
+            return True
+        except NetgearError:
+            pass
+        self._hash_param = "hash"
+        try:
+            await self._request(_GET_CGI, "home_loginStatus")
+            return True
         except NetgearError:
             return False
-        return True
 
     async def async_login(self) -> None:
         """Authenticate and store the CSRF session header.
@@ -257,12 +271,12 @@ class NetgearPoeApi:
         for _ in range(5):
             if auth_id:
                 status = await self._request(
-                    "set.cgi",
+                    _SET_CGI,
                     "home_loginStatus",
                     form_body({"authId": auth_id, "xsrf": "undefined"}),
                 )
             else:
-                status = await self._request("get.cgi", "home_loginStatus")
+                status = await self._request(_GET_CGI, "home_loginStatus")
             data = status.get("data", {})
             if data.get("status") == "ok" and data.get("sess"):
                 sess = b64decode(data["sess"]).decode()
@@ -286,12 +300,12 @@ class NetgearPoeApi:
         """
         body = form_body({"pwd": encode_password(self._password)})
         try:
-            return await self._request("set.cgi", "home_loginAuth", body)
+            return await self._request(_SET_CGI, "home_loginAuth", body)
         except NetgearError as err:
             if err.status != 400 or self._hash_param != "bj4":
                 raise
             self._hash_param = "hash"
-            return await self._request("set.cgi", "home_loginAuth", body)
+            return await self._request(_SET_CGI, "home_loginAuth", body)
 
     async def _authed_request(
         self, cgi: str, cmd: str, body: str | None = None
@@ -318,7 +332,7 @@ class NetgearPoeApi:
         last_exc: NetgearError | None = None
         for attempt in range(retries + 1):
             try:
-                result = await self._authed_request("get.cgi", "port_port")
+                result = await self._authed_request(_GET_CGI, "port_port")
             except NetgearError as err:
                 last_exc = err
             else:
@@ -338,7 +352,7 @@ class NetgearPoeApi:
 
     async def async_get_data(self) -> PoeData:
         """Fetch PoE state for all ports."""
-        result = await self._authed_request("get.cgi", "poe_port")
+        result = await self._authed_request(_GET_CGI, "poe_port")
         rows = _port_rows(result)
         if not rows:
             raise NetgearError(f"No PoE ports in poe_port response: {result}")
@@ -393,7 +407,7 @@ class NetgearPoeApi:
             raise NetgearError(f"Port {port} not found")
         fields = _set_fields(data.ports[port].raw, port)
         fields["state"] = 1 if enabled else 0
-        result = await self._authed_request("set.cgi", "poe_port", form_body(fields))
+        result = await self._authed_request(_SET_CGI, "poe_port", form_body(fields))
         if result.get("status") != "ok":
             raise NetgearError(f"PoE set failed: {result}")
 
@@ -405,7 +419,7 @@ class NetgearPoeApi:
         fields = _set_fields(data.ports[port].raw, port)
         fields["state"] = 1
         result = await self._authed_request(
-            "set.cgi", "poe_portReset", form_body(fields)
+            _SET_CGI, "poe_portReset", form_body(fields)
         )
         if result.get("status") != "ok":
             raise NetgearError(f"PoE reset failed: {result}")
@@ -416,7 +430,7 @@ class NetgearPoeApi:
         The edit form echoes the port's link settings alongside the new
         description, so the current port_port row is fetched first.
         """
-        result = await self._authed_request("get.cgi", "port_port")
+        result = await self._authed_request(_GET_CGI, "port_port")
         row: dict[str, Any] | None = None
         for index, candidate in enumerate(result.get("data", {}).get("ports", [])):
             if int(candidate.get("ifindex", index + 1)) == port:
@@ -434,7 +448,7 @@ class NetgearPoeApi:
             "xsrf": "undefined",
         }
         result = await self._authed_request(
-            "set.cgi", "port_portEdit", form_body(fields)
+            _SET_CGI, "port_portEdit", form_body(fields)
         )
         if result.get("status") != "ok":
             raise NetgearError(f"Port name set failed: {result}")
@@ -452,7 +466,7 @@ class NetgearPoeApi:
         linkUpDown/PoE trap flags are left as configured on the switch.
         """
         await self._authed_request(
-            "set.cgi",
+            _SET_CGI,
             "snmp_trapConfgAdd",
             form_body(
                 {
@@ -472,7 +486,7 @@ class NetgearPoeApi:
         (and a plain txtVerModelName alongside the lang()-wrapped sysProduct).
         Read both spellings so neither generation reports blanks.
         """
-        result = await self._authed_request("get.cgi", "sys_info")
+        result = await self._authed_request(_GET_CGI, "sys_info")
         data = result.get("data", {})
         model = _parse_lang_key(
             str(data.get("sysProduct", "")), "txtModelDescp"
@@ -492,7 +506,7 @@ class NetgearPoeApi:
             return
         try:
             await self._request(
-                "set.cgi", "home_logout", form_body({"empty": 1, "xsrf": "undefined"})
+                _SET_CGI, "home_logout", form_body({"empty": 1, "xsrf": "undefined"})
             )
         except NetgearError:
             _LOGGER.debug("Logout request failed", exc_info=True)
