@@ -12,7 +12,7 @@ ProSAFE-Plus-only models (configured solely via the ProSAFE utility, e.g.
 GS105Ev2, GS108PEv3) do not.
 
 Note: these switches expose only read-only MIB-2 over SNMP, so PoE control
-goes through the same web API the switch's UI uses. Four firmware
+goes through the same web API the switch's UI uses. Five firmware
 generations are supported and detected automatically — the integration
 probes the switch rather than trusting the model name, since revisions of
 one model (a GS110TP vs a GS110TPv3) can speak different APIs:
@@ -20,6 +20,10 @@ one model (a GS110TP vs a GS110TPv3) can speak different APIs:
 - **JSON CGI** (GS728TPv2-class, firmware 6.x on Realtek RTL83xx):
   `/cgi/get.cgi`, `/cgi/set.cgi`. Protocol notes:
   <https://github.com/tai/gs310tp>.
+- **JSON CGI, redesigned "aj4" UI** (GS728TPPv3-class, firmware 6.2.x): the
+  same CGI endpoints behind a rebuilt Bootstrap/Backbone web UI. Requests
+  are unchanged, but every write carries a rotating CSRF token and the
+  session's RSA key is parsed slightly differently.
 - **Legacy XML "xui"** (GS516TP-class, Marvell firmware 6.0.x): the UI
   served under a per-device `/csb<hex>/` path prefix, with data over the
   `wcd` XML endpoint. These switches have no native PoE reset, so power

@@ -195,6 +195,24 @@ class NetgearPoeApi:
             )
         return self._session
 
+    def _form_body(self, fields: dict[str, Any]) -> str:
+        """Build a set.cgi body; a subclass hook for firmware that adds
+        generation-specific fields (e.g. the aj4 UI's rotating xsrf token)."""
+        return form_body(fields)
+
+    def _parse_sess(self, sess: str) -> tuple[str, str, str]:
+        """Split the b64-decoded session into (tabid, exponent, modulus).
+
+        This firmware's home.html slices substring(37, length-1) — the last
+        byte of the session blob is not part of the modulus. The aj4 UI keeps
+        the whole remainder and overrides this.
+        """
+        return sess[:32], sess[32:37], sess[37:-1]
+
+    def _login_auth_ok(self, result: dict[str, Any]) -> bool:
+        """Whether the home_loginAuth response accepted the password post."""
+        return result.get("status") == "ok"
+
     def _url(self, cgi: str, cmd: str) -> str:
         query = f"cmd={cmd}&dummy={int(time.time() * 1000)}"
         checksum = md5(query.encode()).hexdigest()
@@ -262,7 +280,7 @@ class NetgearPoeApi:
         """
         self._xsid_header = None
         result = await self._login_auth()
-        if result.get("status") != "ok":
+        if not self._login_auth_ok(result):
             raise NetgearAuthError(f"Login rejected: {result}")
         # Newer firmware returns an authId to hand back to home_loginStatus;
         # older firmware establishes the session here and answers a plain GET.
@@ -273,14 +291,14 @@ class NetgearPoeApi:
                 status = await self._request(
                     _SET_CGI,
                     "home_loginStatus",
-                    form_body({"authId": auth_id, "xsrf": "undefined"}),
+                    self._form_body({"authId": auth_id, "xsrf": "undefined"}),
                 )
             else:
                 status = await self._request(_GET_CGI, "home_loginStatus")
             data = status.get("data", {})
             if data.get("status") == "ok" and data.get("sess"):
                 sess = b64decode(data["sess"]).decode()
-                tabid, expo, modulus = sess[:32], sess[32:37], sess[37:-1]
+                tabid, expo, modulus = self._parse_sess(sess)
                 self._xsid_header = rsa_encrypt(tabid, expo, modulus)
                 return
             if str(data.get("status", "")).lower() == "fail":
@@ -298,7 +316,7 @@ class NetgearPoeApi:
         (timeout, reset, server error) is re-raised unchanged — flipping the
         parameter on those would leave a "bj4" switch stuck on "hash".
         """
-        body = form_body({"pwd": encode_password(self._password)})
+        body = self._form_body({"pwd": encode_password(self._password)})
         try:
             return await self._request(_SET_CGI, "home_loginAuth", body)
         except NetgearError as err:
@@ -407,7 +425,9 @@ class NetgearPoeApi:
             raise NetgearError(f"Port {port} not found")
         fields = _set_fields(data.ports[port].raw, port)
         fields["state"] = 1 if enabled else 0
-        result = await self._authed_request(_SET_CGI, "poe_port", form_body(fields))
+        result = await self._authed_request(
+            _SET_CGI, "poe_port", self._form_body(fields)
+        )
         if result.get("status") != "ok":
             raise NetgearError(f"PoE set failed: {result}")
 
@@ -419,7 +439,7 @@ class NetgearPoeApi:
         fields = _set_fields(data.ports[port].raw, port)
         fields["state"] = 1
         result = await self._authed_request(
-            _SET_CGI, "poe_portReset", form_body(fields)
+            _SET_CGI, "poe_portReset", self._form_body(fields)
         )
         if result.get("status") != "ok":
             raise NetgearError(f"PoE reset failed: {result}")
@@ -448,7 +468,7 @@ class NetgearPoeApi:
             "xsrf": "undefined",
         }
         result = await self._authed_request(
-            _SET_CGI, "port_portEdit", form_body(fields)
+            _SET_CGI, "port_portEdit", self._form_body(fields)
         )
         if result.get("status") != "ok":
             raise NetgearError(f"Port name set failed: {result}")
@@ -468,7 +488,7 @@ class NetgearPoeApi:
         await self._authed_request(
             _SET_CGI,
             "snmp_trapConfgAdd",
-            form_body(
+            self._form_body(
                 {
                     "recipientsIP": dest_ip,
                     "version": 1,
@@ -506,7 +526,9 @@ class NetgearPoeApi:
             return
         try:
             await self._request(
-                _SET_CGI, "home_logout", form_body({"empty": 1, "xsrf": "undefined"})
+                _SET_CGI,
+                "home_logout",
+                self._form_body({"empty": 1, "xsrf": "undefined"}),
             )
         except NetgearError:
             _LOGGER.debug("Logout request failed", exc_info=True)
