@@ -152,19 +152,25 @@ async def _async_setup_traps(
     return receiver
 
 
-async def _async_broadcast_addrs(hass: HomeAssistant) -> tuple[str, ...]:
-    """The global broadcast plus each interface's subnet-directed one.
+async def _async_scan_addrs(
+    hass: HomeAssistant,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Broadcast targets and local bind addresses for the NSDP scan.
 
     The global 255.255.255.255 only leaves via the default-route interface,
-    so on a multi-homed host (VLANs, Docker) switches on any other subnet
-    never hear the request — NSDP must also target e.g. 192.168.1.255.
+    so on a multi-homed host (VLANs, Docker, a second NIC) switches on any
+    other subnet never hear the request. Returns (broadcast_addrs,
+    local_addrs): the global broadcast plus each interface's subnet-directed
+    one, and each interface's own IP so the scanner can also bind a socket
+    per interface like Netgear's discovery tools do.
     """
-    addrs = {"255.255.255.255"}
+    broadcast = {"255.255.255.255"}
+    local: set[str] = set()
     try:
         adapters = await network.async_get_adapters(hass)
     except Exception:  # noqa: BLE001 — discovery must survive without this
         _LOGGER.debug("Could not enumerate network adapters", exc_info=True)
-        return tuple(addrs)
+        return tuple(broadcast), ()
     for adapter in adapters:
         if not adapter["enabled"]:
             continue
@@ -173,8 +179,9 @@ async def _async_broadcast_addrs(hass: HomeAssistant) -> tuple[str, ...]:
             # /31, /32 and loopback have no usable directed broadcast.
             if iface.ip.is_loopback or iface.network.prefixlen >= 31:
                 continue
-            addrs.add(str(iface.network.broadcast_address))
-    return tuple(sorted(addrs))
+            broadcast.add(str(iface.network.broadcast_address))
+            local.add(str(iface.ip))
+    return tuple(sorted(broadcast)), tuple(sorted(local))
 
 
 async def _async_run_discovery(hass: HomeAssistant) -> None:
@@ -185,9 +192,11 @@ async def _async_run_discovery(hass: HomeAssistant) -> None:
         if entry.unique_id
     }
     try:
+        broadcast_addrs, local_addrs = await _async_scan_addrs(hass)
         switches = await async_discover(
             duration=DISCOVERY_SCAN_SECONDS,
-            broadcast_addrs=await _async_broadcast_addrs(hass),
+            broadcast_addrs=broadcast_addrs,
+            local_addrs=local_addrs,
         )
     except Exception:
         _LOGGER.debug("NSDP discovery scan failed", exc_info=True)

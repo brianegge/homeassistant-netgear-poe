@@ -111,13 +111,14 @@ async def test_discovery_flow_dedupes_configured(
     assert result["reason"] == "already_configured"
 
 
-async def test_broadcast_addrs_cover_all_interfaces(hass: HomeAssistant) -> None:
-    """Each enabled interface contributes its subnet-directed broadcast.
+async def test_scan_addrs_cover_all_interfaces(hass: HomeAssistant) -> None:
+    """Each enabled interface contributes its directed broadcast and its IP.
 
     The global 255.255.255.255 only leaves via the default-route interface,
-    so a multi-homed host must also target the other subnets directly.
+    so a multi-homed host must also target the other subnets directly and
+    bind a socket per interface.
     """
-    from custom_components.netgear_poe import _async_broadcast_addrs
+    from custom_components.netgear_poe import _async_scan_addrs
 
     adapters = [
         {"enabled": True, "ipv4": [{"address": "192.168.3.13", "network_prefix": 24}]},
@@ -131,22 +132,24 @@ async def test_broadcast_addrs_cover_all_interfaces(hass: HomeAssistant) -> None
         "custom_components.netgear_poe.network.async_get_adapters",
         return_value=adapters,
     ):
-        addrs = await _async_broadcast_addrs(hass)
+        broadcast, local = await _async_scan_addrs(hass)
 
-    assert addrs == ("192.168.1.255", "192.168.3.255", "255.255.255.255")
+    assert broadcast == ("192.168.1.255", "192.168.3.255", "255.255.255.255")
+    assert local == ("192.168.1.109", "192.168.3.13")
 
 
-async def test_broadcast_addrs_survive_helper_failure(hass: HomeAssistant) -> None:
+async def test_scan_addrs_survive_helper_failure(hass: HomeAssistant) -> None:
     """If adapter enumeration fails, fall back to the global broadcast."""
-    from custom_components.netgear_poe import _async_broadcast_addrs
+    from custom_components.netgear_poe import _async_scan_addrs
 
     with patch(
         "custom_components.netgear_poe.network.async_get_adapters",
         side_effect=RuntimeError("no network integration"),
     ):
-        addrs = await _async_broadcast_addrs(hass)
+        broadcast, local = await _async_scan_addrs(hass)
 
-    assert addrs == ("255.255.255.255",)
+    assert broadcast == ("255.255.255.255",)
+    assert local == ()
 
 
 async def test_scanner_offers_pro_and_probed_plus_switches(
