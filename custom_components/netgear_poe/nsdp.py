@@ -4,10 +4,12 @@ NSDP is Netgear's proprietary L2 discovery protocol (the ProSAFE utility
 uses it). It is a UDP broadcast request/response with a 32-byte header and
 TLV records. Two port pairs are in use:
 
-* 63321 -> 63322: "Plus" smart switches (GS10x/JGSxx). This integration's
-  web CGI does NOT drive these.
+* 63321 -> 63322: "Plus" smart switches (GS1xx/GS3xx/JGSxx). A mixed bag:
+  some run web UIs this integration drives (base-UI GS110TP, cheetah
+  GS324TP), some are ProSAFE-Plus-only. Discovery probes the web UI
+  before offering one of these.
 * 63323 -> 63324: "Smart Managed Pro" switches (GS7xx, e.g. GS728TPv2),
-  which is what this integration controls.
+  which this integration always controls.
 
 The reply is broadcast, so any non-zero host MAC works (an all-zero host MAC
 makes the switch return an error with no data). Switches answer probabilistically,

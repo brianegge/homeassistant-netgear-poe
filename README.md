@@ -108,13 +108,14 @@ Netgear's own NSDP protocol (the same one the ProSAFE utility uses), so
 they appear under **Settings → Devices & Services** as "Discovered → Add"
 cards with the host pre-filled — you only enter the admin password.
 
-Only **Smart Managed Pro** switches (e.g. GS728TPv2, GS516TP, GS110TP) are
-offered, since those are the models this integration's web APIs can control. The
-"Plus" line (GS10xPE, JGSxxPE) speaks NSDP too but uses a different web UI
-and is deliberately skipped. NSDP is an L2 broadcast, so it only finds
-switches on Home Assistant's own subnet, and switches answer
-probabilistically — a newly powered switch may take up to a minute to
-appear.
+**Smart Managed Pro** switches (e.g. GS728TPv2) are offered outright.
+Switches that answer NSDP on the "Plus" port pair (GS110TP, GS324TP,
+GS10xPE, JGSxxPE, …) are a mix of supported and unsupported web UIs, so
+discovery probes each one's web UI and only offers those running a
+generation this integration can control; ProSAFE-Plus-only models are
+skipped. NSDP is an L2 broadcast, so it only finds switches on Home
+Assistant's own subnet, and switches answer probabilistically — a newly
+powered switch may take up to a minute to appear.
 
 Discovery runs automatically once any switch is configured (to surface the
 rest). To discover the **first** switch without adding one manually, add

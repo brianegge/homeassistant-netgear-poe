@@ -18,7 +18,7 @@ from homeassistant.helpers.typing import ConfigType
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import NetgearAuthError, NetgearError, PoeData
-from .api_legacy import NetgearAnyApi, async_detect_api
+from .api_legacy import NetgearAnyApi, async_detect_api, async_probe_supported
 from .const import (
     CONF_COMMUNITY,
     CONF_ENABLE_TRAPS,
@@ -151,7 +151,7 @@ async def _async_setup_traps(
 
 
 async def _async_run_discovery(hass: HomeAssistant) -> None:
-    """Run one NSDP scan and offer any new Pro switches for setup."""
+    """Run one NSDP scan and offer any new supported switches for setup."""
     configured = {
         entry.unique_id
         for entry in hass.config_entries.async_entries(DOMAIN)
@@ -168,8 +168,19 @@ async def _async_run_discovery(hass: HomeAssistant) -> None:
         ", ".join(f"{s.name}/{s.model}" for s in switches),
     )
     for switch in switches:
-        # Only offer switches this integration's web API can actually drive.
-        if not switch.is_pro or format_mac(switch.mac) in configured:
+        if format_mac(switch.mac) in configured:
+            continue
+        # Pro-port switches always run a supported web API. Plus-port
+        # switches are a mix — base-UI/cheetah generations are supported,
+        # ProSAFE-Plus-only models are not — so probe the web UI first.
+        if not switch.is_pro and not await async_probe_supported(switch.host):
+            _LOGGER.debug(
+                "NSDP found %s (%s) at %s but its web UI is not a "
+                "supported generation; skipping",
+                switch.name or switch.mac,
+                switch.model,
+                switch.host,
+            )
             continue
         _LOGGER.info(
             "NSDP discovered %s (%s) at %s — offering setup",

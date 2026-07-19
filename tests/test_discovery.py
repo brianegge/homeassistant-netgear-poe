@@ -111,22 +111,38 @@ async def test_discovery_flow_dedupes_configured(
     assert result["reason"] == "already_configured"
 
 
-async def test_scanner_offers_only_pro_switches(hass: HomeAssistant) -> None:
-    """One scan pass creates flows for Pro switches and skips Plus ones."""
+async def test_scanner_offers_pro_and_probed_plus_switches(
+    hass: HomeAssistant,
+) -> None:
+    """Pro switches are offered outright; Plus ones only if their UI probes OK."""
     from custom_components.netgear_poe import _async_run_discovery
 
     switches = [
         NsdpSwitch(
             "28:80:88:54:db:08", "192.168.254.250", "GS728TPv2", "boiler", "6", True
         ),
+        # Plus-port switch running a supported base-UI generation.
+        NsdpSwitch(
+            "3c:37:86:17:47:34", "192.168.254.251", "GS110TP", "chapel", "5", False
+        ),
+        # Plus-port switch with no drivable web UI.
         NsdpSwitch(
             "28:80:88:e0:07:23", "192.168.254.252", "GS108PEv3", "deck", "2", False
         ),
     ]
     created: list[dict] = []
+    probed: list[str] = []
+
+    async def fake_probe(host: str) -> bool:
+        probed.append(host)
+        return host == "192.168.254.251"
 
     with (
         patch("custom_components.netgear_poe.async_discover", return_value=switches),
+        patch(
+            "custom_components.netgear_poe.async_probe_supported",
+            side_effect=fake_probe,
+        ),
         patch(
             "custom_components.netgear_poe.discovery_flow.async_create_flow",
             side_effect=lambda h, d, *, context, data: created.append(data),
@@ -134,6 +150,38 @@ async def test_scanner_offers_only_pro_switches(hass: HomeAssistant) -> None:
     ):
         await _async_run_discovery(hass)
 
-    assert len(created) == 1
-    assert created[0]["host"] == "192.168.254.250"
-    assert created[0]["mac"] == "28:80:88:54:db:08"
+    # The Pro switch is never probed; both Plus switches are.
+    assert probed == ["192.168.254.251", "192.168.254.252"]
+    assert [c["host"] for c in created] == ["192.168.254.250", "192.168.254.251"]
+    assert created[1]["mac"] == "3c:37:86:17:47:34"
+
+
+async def test_scanner_skips_probe_for_configured_plus_switch(
+    hass: HomeAssistant,
+) -> None:
+    """An already-configured switch is skipped before any web probe."""
+    from custom_components.netgear_poe import _async_run_discovery
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={"host": "192.168.254.251", "password": "x", "community": ""},
+        unique_id="3c:37:86:17:47:34",
+    )
+    entry.add_to_hass(hass)
+    switches = [
+        NsdpSwitch(
+            "3c:37:86:17:47:34", "192.168.254.251", "GS110TP", "chapel", "5", False
+        ),
+    ]
+
+    with (
+        patch("custom_components.netgear_poe.async_discover", return_value=switches),
+        patch("custom_components.netgear_poe.async_probe_supported") as probe,
+        patch(
+            "custom_components.netgear_poe.discovery_flow.async_create_flow"
+        ) as create_flow,
+    ):
+        await _async_run_discovery(hass)
+
+    probe.assert_not_called()
+    create_flow.assert_not_called()

@@ -225,6 +225,19 @@ class NetgearPoeApi:
                 error.status = err.status
             raise error from err
 
+    async def async_probe(self) -> bool:
+        """Whether the host serves the JSON CGI at all (no auth needed).
+
+        Generation detection falls through to this client for any web UI it
+        doesn't recognize, so NSDP discovery calls this to confirm the CGI
+        actually answers before offering the switch for setup.
+        """
+        try:
+            await self._request("get.cgi", "home_loginStatus")
+        except NetgearError:
+            return False
+        return True
+
     async def async_login(self) -> None:
         """Authenticate and store the CSRF session header.
 

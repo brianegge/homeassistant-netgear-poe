@@ -103,6 +103,23 @@ async def test_get_data_populates_port_names() -> None:
     assert data.consumption_watts == 6.5
 
 
+async def test_probe_answers_json() -> None:
+    """The CGI answering any JSON to an unauth status read means present."""
+    api = NetgearPoeApi("host", "pw")
+    api._request = AsyncMock(return_value={"data": {"status": "fail"}})
+
+    assert await api.async_probe() is True
+    api._request.assert_awaited_once_with("get.cgi", "home_loginStatus")
+
+
+async def test_probe_no_cgi() -> None:
+    """A host without the JSON CGI (404 / HTML answer) probes False."""
+    api = NetgearPoeApi("host", "pw")
+    api._request = AsyncMock(side_effect=NetgearError("Non-JSON response"))
+
+    assert await api.async_probe() is False
+
+
 async def test_get_info_parses_firmware() -> None:
     """sys_info maps sysName, the model lang key and fwVer."""
     api = NetgearPoeApi("host", "pw")

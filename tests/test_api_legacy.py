@@ -24,6 +24,7 @@ from custom_components.netgear_poe.api_legacy import (
     _escape_password,
     _parse_xml,
     async_detect_api,
+    async_probe_supported,
 )
 
 POE_LIST_XML = """<?xml version="1.0" encoding="UTF-8" ?>
@@ -427,6 +428,48 @@ async def test_detect_api_https_url_uses_scheme() -> None:
     )
     api = await async_detect_api("h", "pw", session=session)
     assert api._url("cgi", "cmd").startswith("https://h/")
+
+
+async def test_probe_supported_recognized_login_page() -> None:
+    """A page-recognized generation (base-UI) is supported without a CGI probe."""
+    session = _mock_session(None, '<FORM METHOD="POST" ACTION="/base/main_login.html">')
+    with patch(
+        "custom_components.netgear_poe.api_legacy.aiohttp.ClientSession",
+        return_value=session,
+    ):
+        assert await async_probe_supported("h") is True
+
+
+@pytest.mark.parametrize("cgi_answers", [True, False])
+async def test_probe_supported_unknown_page_asks_json_cgi(cgi_answers: bool) -> None:
+    """An unrecognized page is supported only if the JSON CGI answers."""
+    session = _mock_session(None, "<html><body>login</body></html>")
+    with (
+        patch(
+            "custom_components.netgear_poe.api_legacy.aiohttp.ClientSession",
+            return_value=session,
+        ),
+        patch.object(
+            NetgearPoeApi, "async_probe", AsyncMock(return_value=cgi_answers)
+        ) as probe,
+        patch.object(NetgearPoeApi, "async_close", AsyncMock()) as close,
+    ):
+        assert await async_probe_supported("h") is cgi_answers
+    probe.assert_awaited_once()
+    close.assert_awaited_once()
+
+
+async def test_probe_supported_unreachable_host() -> None:
+    """A host that doesn't answer HTTP is not supported (and doesn't raise)."""
+    session = _mock_session(None)
+    session.get.return_value.__aenter__ = AsyncMock(
+        side_effect=aiohttp.ClientError("no route")
+    )
+    with patch(
+        "custom_components.netgear_poe.api_legacy.aiohttp.ClientSession",
+        return_value=session,
+    ):
+        assert await async_probe_supported("h") is False
 
 
 IMAGE_LIST_XML = """<?xml version="1.0" encoding="UTF-8" ?>
