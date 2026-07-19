@@ -9,6 +9,7 @@ instead of breaking the integration.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -68,7 +69,10 @@ class SnmpLinkMonitor:
         )
 
         if self._engine is None:
-            self._engine = SnmpEngine()
+            # Constructing the engine loads pysnmp's MIB modules, which does
+            # blocking filesystem reads; keep those off the event loop.
+            loop = asyncio.get_running_loop()
+            self._engine = await loop.run_in_executor(None, SnmpEngine)
         target = await UdpTransportTarget.create((self.host, 161), timeout=5, retries=1)
         base = tuple(int(x) for x in oid.split("."))
         result: dict[int, Any] = {}
