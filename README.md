@@ -24,8 +24,17 @@ one model (a GS110TP vs a GS110TPv3) can speak different APIs:
   SNMP trap destination (link state falls back to polling).
 - **S350 EmWeb** (GS324TP-class, firmware 1.0.x): a hardened evolution of
   the classic UI with pages served as compiled-in routes at the site root.
-  PoE on/off and power cycling work; setting port names (use SNMP `ifAlias`)
-  and firmware install are not supported on this generation yet.
+  PoE on/off, power cycling and firmware install all work; setting port
+  names does not (use SNMP `ifAlias`). Firmware 1.0.0.44+ adds a per-request
+  CSRF token — the integration reads it from each form and echoes it back, so
+  newer firmware keeps working transparently.
+
+Any of these can be reached over **HTTPS** as well as plain HTTP. A switch
+whose web admin mode is set to HTTPS (and so redirects HTTP there, or refuses
+it) is detected and driven over TLS, accepting the switch's self-signed
+certificate — the same thing a browser does reaching that UI on the LAN. The
+scheme is re-detected on every setup, so flipping a switch between HTTP and
+HTTPS needs no reconfiguration.
 
 ## Entities
 
@@ -36,8 +45,8 @@ For each PoE port the integration creates:
   `power_watts` attributes so automations can check whether the powered
   device is actually drawing power.
 - **Button** — power cycles the port: JSON CGI models use the switch's
-  native PoE reset; legacy xui and classic HTML models toggle PoE off and
-  back on.
+  native PoE reset; legacy xui, classic HTML and S350 EmWeb models toggle PoE
+  off and back on.
 
 With an SNMP community configured, you also get a per-port **link**
 binary sensor (`connectivity`) from IF-MIB `ifOperStatus`, polled every
@@ -49,30 +58,33 @@ instantly (the poll remains a backstop for dropped UDP traps).
 Plus one **PoE power** sensor with the switch's total PoE draw in watts,
 and a **Firmware** update entity. The latest known firmware per model is
 bundled with the integration (version, download link and release notes).
-On classic HTML and legacy xui models the entity can also **install** the
-update: it downloads the image from Netgear, flashes it to the switch's
-inactive firmware slot (the running version stays in the other slot as a
-rollback), and reboots. The reboot cuts PoE — every powered camera and AP —
-and the switch's own uplink for a minute or more, so trigger it at a quiet
-moment. JSON CGI models show the available version and release notes but
-have no Install button.
+On classic HTML, legacy xui and S350 EmWeb models the entity can also
+**install** the update: it downloads the image from Netgear, flashes it to
+the switch's inactive firmware slot (the running version stays in the other
+slot as a rollback), and reboots. The reboot cuts PoE — every powered camera
+and AP — and the switch's own uplink for a minute or more, so trigger it at a
+quiet moment. JSON CGI models (GS310TP, GS110TPv3, GS728TPPv3, …) show the
+available version and release notes but have no Install button yet.
 
-An install takes 5–10 minutes, and the progress bar only moves when the
-switch reports something. Legacy xui models report bytes transferred, so
-the bar advances through the upload. Classic HTML models report nothing
-while they write flash, so the bar sits at **20 % for several minutes**
-there — the switch's own web UI just says to wait, and a stalled bar is
-normal rather than a hang. Both then creep from 80 % to 95 % while the
-switch reboots, and reach 100 % once the new version is confirmed running.
+An install takes a few minutes to about ten, and the progress bar advances
+through the upload on every backend. Legacy xui models report the switch's
+own bytes-transferred counter; classic HTML and S350 models count the bytes
+streamed to the switch — a slow classic switch (~10 KB/s) steps the bar up
+through roughly 20 → 60 % over the upload. It then creeps 80 → 95 % during the
+reboot and reaches 100 % once the new version is confirmed running. (S350
+switches buffer the upload in seconds and then write flash for a few minutes,
+reporting no byte count during the write, so the bar can hold in the 40–60 %
+band there — that pause is normal, not a hang.)
 
 ## Actions
 
 `netgear_poe.set_port_name` sets a port's description on the switch,
 targeting the port's PoE switch entity. On JSON CGI and classic HTML models
 this is the port description (also visible as SNMP `ifAlias`); on legacy xui
-models it is the PoE "powered device" field. Entity names include the port
-description and are fixed at setup, so they pick up the new name after
-the integration is reloaded.
+models it is the PoE "powered device" field. S350 EmWeb models don't support
+setting names over the web UI yet — SNMP `ifAlias` supplies their port names.
+Entity names include the port description and are fixed at setup, so they
+pick up the new name after the integration is reloaded.
 
 ```yaml
 action: netgear_poe.set_port_name

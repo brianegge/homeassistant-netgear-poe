@@ -41,6 +41,7 @@ from .api import (
     PoeData,
     PoePort,
     SwitchInfo,
+    _insecure_connector,
 )
 from .api_base_ui import NetgearBaseUiApi, NetgearCheetahApi
 
@@ -56,8 +57,12 @@ type NetgearAnyApi = (
 # time, and every xui switch on a network answers with the same one at any
 # given moment, so it can't be cached across logins (async_login re-reads it).
 # Matching only "csbe" + digits, as this once did, works by luck: it needs the
-# hex to start with 'e' and carry no a-f after it.
-_PREFIX_RE = re.compile(r"/(csb[0-9a-f]+)/", re.I)
+# hex to start with 'e' and carry no a-f after it. And "csb" + hex was STILL
+# too narrow — the 'b' was itself the first hex digit both times it was seen.
+# Observed prefixes: csbe116353, csb555f027 (GS516TP), cs6fc955c0 (GS728TP) —
+# the marker is "cs" followed by 8 hex chars (allow fewer in case the value
+# is ever formatted without zero-padding).
+_PREFIX_RE = re.compile(r"/(cs[0-9a-f]{4,8})/", re.I)
 _BASE_UI_RE = re.compile(r"/base/main_login\.html", re.I)
 # The S350 "cheetah" firmware posts its login to a different page.
 _CHEETAH_RE = re.compile(r"/base/cheetah_login\.html", re.I)
@@ -118,12 +123,17 @@ class NetgearLegacyApi:
         password: str,
         session: aiohttp.ClientSession | None = None,
         prefix: str | None = None,
+        use_https: bool = False,
     ) -> None:
         self.host = host
         self._password = password
         self._session = session
         self._owns_session = session is None
         self._prefix = prefix
+        # HTTPS-configured switches redirect HTTP to it; detection records the
+        # scheme so every request uses the right one.
+        self.use_https = use_https
+        self._scheme = "https" if use_https else "http"
         self._cookie: str | None = None
         self._login_lock = asyncio.Lock()
         # Interface names ("g5") keyed by port number, learned from polls.
@@ -135,15 +145,16 @@ class NetgearLegacyApi:
     def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None:
             self._session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=15)
+                timeout=aiohttp.ClientTimeout(total=15),
+                # HTTPS switches present a self-signed certificate.
+                connector=_insecure_connector() if self.use_https else None,
             )
         return self._session
 
     def _url(self, path_and_query: str) -> URL:
         # encoded=True keeps the literal {braces} the wcd endpoint requires.
-        # These switches serve plain HTTP only; they have no TLS support.
         return URL(
-            f"http://{self.host}/{self._prefix}/{path_and_query}",  # NOSONAR
+            f"{self._scheme}://{self.host}/{self._prefix}/{path_and_query}",
             encoded=True,
         )
 
@@ -152,7 +163,7 @@ class NetgearLegacyApi:
         session = self._get_session()
         try:
             resp = await session.get(
-                f"http://{self.host}/",  # NOSONAR — the switch is HTTP-only
+                f"{self._scheme}://{self.host}/",
                 allow_redirects=False,
             )
         except (aiohttp.ClientError, TimeoutError) as err:
@@ -631,29 +642,64 @@ async def async_detect_api(
     timeout = aiohttp.ClientTimeout(total=10)
     probe_session = session or aiohttp.ClientSession(timeout=timeout)
     try:
-        try:
-            # async with: the legacy branch never reads the body, so without it
-            # the response would keep a connection out of a caller-supplied
-            # session's pool.
-            async with probe_session.get(
-                f"http://{host}/",  # NOSONAR — probing the HTTP-only web UI
-                allow_redirects=False,
-            ) as resp:
-                match = _PREFIX_RE.search(resp.headers.get("Location", ""))
-                # Only the non-redirecting generations need their body read.
-                body = "" if match else await resp.text(errors="replace")
-        except (aiohttp.ClientError, TimeoutError) as err:
-            raise NetgearError(f"Cannot connect to {host}: {err}") from err
+        use_https, match, body = await _probe_root(host, probe_session)
     finally:
         if session is None:
             await probe_session.close()
 
     if match is not None:
         return NetgearLegacyApi(
-            host=host, password=password, session=session, prefix=match.group(1)
+            host=host,
+            password=password,
+            session=session,
+            prefix=match.group(1),
+            use_https=use_https,
         )
     if _CHEETAH_RE.search(body):
-        return NetgearCheetahApi(host=host, password=password, session=session)
+        return NetgearCheetahApi(
+            host=host, password=password, session=session, use_https=use_https
+        )
     if _BASE_UI_RE.search(body):
-        return NetgearBaseUiApi(host=host, password=password, session=session)
-    return NetgearPoeApi(host=host, password=password, session=session)
+        return NetgearBaseUiApi(
+            host=host, password=password, session=session, use_https=use_https
+        )
+    return NetgearPoeApi(
+        host=host, password=password, session=session, use_https=use_https
+    )
+
+
+async def _probe_root(
+    host: str, probe_session: aiohttp.ClientSession
+) -> tuple[bool, re.Match[str] | None, str]:
+    """Fetch the root URL and classify the switch.
+
+    Returns (use_https, legacy-prefix match, body). Tries plain HTTP first,
+    then HTTPS if the switch redirects HTTP there or refuses it outright. The
+    legacy-prefix redirect (Location: /csb<hex>/) is read from the headers;
+    the other generations are told apart by their login page in the body.
+    ssl=False accepts the switches' self-signed certificate on the HTTPS probe.
+    """
+    error: Exception | None = None
+    for scheme in ("http", "https"):
+        try:
+            async with probe_session.get(
+                f"{scheme}://{host}/", allow_redirects=False, ssl=False
+            ) as resp:
+                location = resp.headers.get("Location", "")
+                redirects_to_https = location.lower().startswith("https://")
+                # A switch forcing HTTPS answers HTTP with a redirect to it;
+                # re-probe over HTTPS to classify it — unless the redirect
+                # already carries the legacy prefix, which classifies it here
+                # (falling through so we don't miss that it wants HTTPS).
+                if (
+                    scheme == "http"
+                    and redirects_to_https
+                    and _PREFIX_RE.search(location) is None
+                ):
+                    continue
+                match = _PREFIX_RE.search(location)
+                body = "" if match else await resp.text(errors="replace")
+                return scheme == "https" or redirects_to_https, match, body
+        except (aiohttp.ClientError, TimeoutError) as err:
+            error = err  # HTTP may be closed on an HTTPS-only switch; try HTTPS
+    raise NetgearError(f"Cannot connect to {host}: {error}")

@@ -78,6 +78,19 @@ LATEST_FIRMWARE: Final[dict[str, FirmwareRelease]] = {
             "GS110TP-GS108Tv2-Firmware-Version-5-4-2-35"
         ),
     ),
+    # GS728TP (v1) — xui firmware, same 6.0.1.x line as the GS516TP; one zip
+    # covers GS728TP/GS728TPP/GS752TP.
+    "1.3.6.1.4.1.4526.100.4.25": FirmwareRelease(
+        version="6.0.1.30",
+        url=(
+            "https://www.downloads.netgear.com/files/GDC/GS728TP/"
+            "GS728TP_GS728TPP_GS752TP_V6.0.1.30.zip"
+        ),
+        notes_url=(
+            "https://kb.netgear.com/000062486/"
+            "GS728TP-GS728TPP-GS752TP-Firmware-Version-6-0-1-30"
+        ),
+    ),
     # GS516TP
     "1.3.6.1.4.1.4526.100.4.29": FirmwareRelease(
         version="6.0.1.30",
@@ -85,6 +98,33 @@ LATEST_FIRMWARE: Final[dict[str, FirmwareRelease]] = {
             "https://www.downloads.netgear.com/files/GDC/GS516TP/GS516TP_V6.0.1.30.zip"
         ),
         notes_url="https://kb.netgear.com/000062485/GS516TP-Firmware-Version-6-0-1-30",
+    ),
+    # GS310TP on early 1.0.0.x firmware reports this sysObjectID (a switch on
+    # 1.0.0.9 answers ...4.48 where its 1.0.1.x+ siblings answer ...4.53); the
+    # same GS308T/GS310TP release applies.
+    "1.3.6.1.4.1.4526.100.4.48": FirmwareRelease(
+        version="1.0.5.12",
+        url=(
+            "https://www.downloads.netgear.com/files/GDC/GS308T/"
+            "GS308T_GS310TP_V1.0.5.12.zip"
+        ),
+        notes_url=(
+            "https://kb.netgear.com/000065851/"
+            "GS308T-GS310TP-Firmware-Version-1-0-5-12"
+        ),
+    ),
+    # GS308T / GS310TP (S350 hardware answering the JSON CGI API, which has no
+    # install path — this entry only surfaces "update available" with notes).
+    "1.3.6.1.4.1.4526.100.4.53": FirmwareRelease(
+        version="1.0.5.12",
+        url=(
+            "https://www.downloads.netgear.com/files/GDC/GS308T/"
+            "GS308T_GS310TP_V1.0.5.12.zip"
+        ),
+        notes_url=(
+            "https://kb.netgear.com/000065851/"
+            "GS308T-GS310TP-Firmware-Version-1-0-5-12"
+        ),
     ),
     # GS324T / GS324TP (S350). Netgear ships one image for both, from the
     # GS324T directory.
@@ -96,6 +136,30 @@ LATEST_FIRMWARE: Final[dict[str, FirmwareRelease]] = {
         ),
         notes_url=(
             "https://kb.netgear.com/000066439/GS324T-GS324TP-Firmware-Version-1-0-0-44"
+        ),
+    ),
+    # GS108Tv3 / GS110TPv3 / GS110TPP — one zip for the family.
+    "1.3.6.1.4.1.4526.100.4.58": FirmwareRelease(
+        version="7.1.1.13",
+        url=(
+            "https://www.downloads.netgear.com/files/GDC/GS108Tv3/"
+            "GS108Tv3_GS110TPv3_GS110TPPv1_V7.1.1.13.zip"
+        ),
+        notes_url=(
+            "https://kb.netgear.com/000070462/"
+            "GS108Tv3-GS110TPv3-GS110TPP-Firmware-Version-7-1-1-13"
+        ),
+    ),
+    # GS728TPv3 / GS728TPPv3 / GS752TPv3 / GS752TPPv3 — one zip for the family.
+    "1.3.6.1.4.1.4526.100.4.69": FirmwareRelease(
+        version="6.2.1.40",
+        url=(
+            "https://www.downloads.netgear.com/files/GDC/GS728TPPv3/"
+            "GS728TPv3_GS728TPPv3_GS752TPv3_GS752TPPv3_V6.2.1.40.zip"
+        ),
+        notes_url=(
+            "https://kb.netgear.com/000070655/"
+            "GS728TPv3-GS728TPPv3-GS752TPv3-GS752TPPv3-Firmware-Version-6-2-1-40"
         ),
     ),
 }

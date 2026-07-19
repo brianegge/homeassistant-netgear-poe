@@ -31,6 +31,28 @@ async def test_user_flow_success(hass: HomeAssistant, mock_api: MagicMock) -> No
     assert result["data"] == MOCK_CONFIG
 
 
+async def test_user_flow_accepts_switch_with_no_poe_ports(
+    hass: HomeAssistant, mock_api: MagicMock
+) -> None:
+    """A non-PoE switch (empty ports) still sets up — for firmware updates.
+
+    The GS108Tv2 has no PoE, so get_data returns empty; that must not block
+    setup the way a login or connection failure does.
+    """
+    from custom_components.netgear_poe.api import PoeData
+
+    mock_api.async_get_data.return_value = PoeData()
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], user_input=MOCK_CONFIG
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["title"] == MOCK_SYS_NAME
+
+
 async def test_user_flow_cannot_connect(
     hass: HomeAssistant, mock_api: MagicMock
 ) -> None:

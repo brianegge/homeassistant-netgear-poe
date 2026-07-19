@@ -35,6 +35,7 @@ import re
 from collections.abc import Callable
 from html import unescape
 from typing import ClassVar
+from uuid import uuid4
 
 import aiohttp
 
@@ -45,9 +46,106 @@ from .api import (
     PoeData,
     PoePort,
     SwitchInfo,
+    _insecure_connector,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# Firmware uploads stream the body in chunks so the progress bar can move as
+# the image goes out. 64 KiB is fine-grained enough that even a slow classic
+# switch (~10 KB/s) steps the bar every few seconds, and matches aiohttp's
+# transport high-water mark so a slow reader applies backpressure per chunk.
+_UPLOAD_CHUNK_BYTES = 64 * 1024
+
+
+class _ProgressUpload(aiohttp.BytesPayload):
+    """A multipart body that steps a progress callback as bytes are sent.
+
+    Stays a plain sized bytes payload so Content-Length is set — these
+    switches reject chunked uploads — and hands the body to the socket in
+    chunks, reporting an integer percent in [base, base+span) after each. Only
+    changes are reported, so a fast (fully buffered) upload doesn't spam the
+    entity. "Sent" is bytes handed to the socket, which can lead what the
+    switch has stored, so the range stops one short of base+span rather than
+    claiming its next milestone.
+
+    aiohttp >= 3.12 drives a sized body through write_with_length(); older
+    aiohttp uses write(). Overriding only write() (as a first cut did) meant
+    the body still streamed but the callbacks never ran under HA's aiohttp.
+    """
+
+    def __init__(
+        self,
+        body: bytes,
+        content_type: str,
+        report: Callable[[int], None] | None,
+        base: int,
+        span: int,
+    ) -> None:
+        super().__init__(body, content_type=content_type)
+        self._report = report
+        self._base = base
+        self._span = span
+        self._last = -1
+
+    def _tick(self, sent: int, total: int) -> None:
+        if self._report is None:
+            return
+        pct = self._base + min(sent * self._span // max(total, 1), self._span - 1)
+        if pct != self._last:
+            self._last = pct
+            self._report(pct)
+
+    async def _stream(
+        self, writer: aiohttp.abc.AbstractStreamWriter, limit: int | None
+    ) -> None:
+        data = self._value if limit is None else self._value[:limit]
+        total = len(data)
+        for start in range(0, total, _UPLOAD_CHUNK_BYTES):
+            await writer.write(data[start : start + _UPLOAD_CHUNK_BYTES])
+            self._tick(min(start + _UPLOAD_CHUNK_BYTES, total), total)
+
+    async def write(self, writer: aiohttp.abc.AbstractStreamWriter) -> None:
+        await self._stream(writer, None)
+
+    async def write_with_length(
+        self, writer: aiohttp.abc.AbstractStreamWriter, content_length: int | None
+    ) -> None:
+        await self._stream(writer, content_length)
+
+
+def _multipart_upload_body(
+    fields: list[tuple[str, str | None]], filename: str, image: bytes
+) -> tuple[bytes, str]:
+    """Assemble a multipart/form-data body, file part at its ordered slot.
+
+    Mirrors what the switch's own upload form posts (and what the reverse-
+    engineering probes used): each text field in document order carrying only
+    a Content-Disposition, the file part where the file input sits. A field is
+    the file when its value is None. Returns (body, Content-Type header value).
+    """
+    boundary = "----netgearpoe" + uuid4().hex
+    crlf = b"\r\n"
+    marker = b"--" + boundary.encode()
+    out: list[bytes] = []
+    for name, value in fields:
+        out.append(marker + crlf)
+        header = f'Content-Disposition: form-data; name="{name}"'
+        if value is None:  # the file input's position
+            out.append(
+                f'{header}; filename="{filename}"'.encode()
+                + crlf
+                + b"Content-Type: application/octet-stream"
+                + crlf
+                + crlf
+            )
+            out.append(image)
+            out.append(crlf)
+        else:
+            out.append(header.encode() + crlf + crlf + value.encode() + crlf)
+    out.append(marker + b"--" + crlf)
+    return b"".join(out), f"multipart/form-data; boundary={boundary}"
+
 
 _ROW_RE = re.compile(r"<tr[^>]*>(.*?)</tr>", re.I | re.S)
 _CELL_RE = re.compile(r"<t[dh][^>]*>(.*?)</t[dh]>", re.I | re.S)
@@ -245,11 +343,16 @@ class NetgearBaseUiApi:
         host: str,
         password: str,
         session: aiohttp.ClientSession | None = None,
+        use_https: bool = False,
     ) -> None:
         self.host = host
         self._password = password
         self._session = session
         self._owns_session = session is None
+        # HTTPS-configured switches redirect HTTP to it; detection records the
+        # scheme so every request uses the right one.
+        self.use_https = use_https
+        self._scheme = "https" if use_https else "http"
         self._logged_in = False
         self._login_lock = asyncio.Lock()
         self._port_names: dict[int, str] = {}
@@ -257,6 +360,11 @@ class NetgearBaseUiApi:
         # descriptions is loaded and empty, not unloaded.
         self._port_names_loaded = False
         self._poll_count = 0
+        # None until the first poll settles it: some models (the non-PoE
+        # GS108Tv2) serve an empty PoE page. An empty page is treated as
+        # "no PoE ports" only before any have been seen; once a switch has
+        # shown ports, a later empty page is a real error, not a model change.
+        self._has_poe: bool | None = None
         # Fetch port names from port_cfg.html; disabled when SNMP (ifAlias) is
         # the name source, to avoid an extra page fetch per refresh.
         self.web_port_names_enabled = True
@@ -266,12 +374,13 @@ class NetgearBaseUiApi:
             self._session = aiohttp.ClientSession(
                 cookie_jar=aiohttp.CookieJar(unsafe=True),
                 timeout=aiohttp.ClientTimeout(total=15),
+                # HTTPS switches present a self-signed certificate.
+                connector=_insecure_connector() if self.use_https else None,
             )
         return self._session
 
     def _url(self, path: str) -> str:
-        # These switches serve plain HTTP only; they have no TLS support.
-        return f"http://{self.host}{path}"  # NOSONAR
+        return f"{self._scheme}://{self.host}{path}"
 
     # The login form's location and its exact field set. Subclasses for
     # later firmware (the S350 "cheetah" UI) override these: the switch
@@ -460,11 +569,21 @@ class NetgearBaseUiApi:
         )
 
     async def async_get_data(self) -> PoeData:
-        """Fetch PoE state for all ports."""
+        """Fetch PoE state for all ports.
+
+        A non-PoE model (e.g. the GS108Tv2) serves an empty PoE page; that is a
+        valid switch with no PoE, returned as empty data so it can still carry
+        a firmware-update entity. Once a switch has shown ports, though, an
+        empty page is a genuine failure and is raised.
+        """
         html = await self._request("/base/poe/poe_port_cfg.html")
         rows = _port_rows(html, ("Port", "Admin Mode", "Status"))
         if not rows:
-            raise NetgearError("No PoE ports in poe_port_cfg response")
+            if self._has_poe:
+                raise NetgearError("No PoE ports in poe_port_cfg response")
+            self._has_poe = False
+            return PoeData()
+        self._has_poe = True
 
         await self._async_refresh_port_names()
         self._poll_count += 1
@@ -564,35 +683,41 @@ class NetgearBaseUiApi:
         return _parse_image_status(await self._request(_IMAGE_STATUS_PATH))
 
     async def _async_upload_firmware(
-        self, slot: str, image: bytes, filename: str
+        self,
+        slot: str,
+        image: bytes,
+        filename: str,
+        progress: Callable[[int], None] | None = None,
     ) -> None:
         """Upload a firmware image to a slot via the HTTP File Download form.
 
         Posted directly rather than through _request: the body is multipart
         (a browser file upload), and the switch flashes the image while the
-        POST is in flight, so it needs its own generous timeout.
+        POST is in flight, so it needs its own generous timeout. Because the
+        switch reads the body as it writes flash, streaming it in chunks makes
+        the progress bar track the real transfer (20..60 here).
         """
-        form = aiohttp.FormData()
         # Field order mirrors the form; a field it doesn't define answers 400.
-        form.add_field("file_type", "code")
-        form.add_field("localfilename", slot)
-        form.add_field(
-            ".filename_handle",
-            image,
-            filename=filename,
-            content_type="application/octet-stream",
-        )
-        form.add_field("download_status", "")
-        form.add_field("submt", _SUBMIT)
-        form.add_field("cncel", "")
-        form.add_field("err_flag", "0")
-        form.add_field("err_msg", "")
+        # The None marks where the file part goes.
+        fields: list[tuple[str, str | None]] = [
+            ("file_type", "code"),
+            ("localfilename", slot),
+            (".filename_handle", None),
+            ("download_status", ""),
+            ("submt", _SUBMIT),
+            ("cncel", ""),
+            ("err_flag", "0"),
+            ("err_msg", ""),
+        ]
+        body, content_type = _multipart_upload_body(fields, filename, image)
+        # The switch flashes as it reads, so the upload spans 20..60 here.
+        payload = _ProgressUpload(body, content_type, progress, 20, 40)
 
         url = self._url(_FIRMWARE_UPLOAD_PATH)
         try:
             async with self._get_session().post(
                 url,
-                data=form,
+                data=payload,
                 headers={"Referer": url},
                 timeout=aiohttp.ClientTimeout(total=_FIRMWARE_UPLOAD_TIMEOUT),
             ) as resp:
@@ -728,7 +853,7 @@ class NetgearBaseUiApi:
             status.current_active,
         )
         report(20)
-        await self._async_upload_firmware(target, image, filename)
+        await self._async_upload_firmware(target, image, filename, progress)
 
         staged = await self.async_get_image_status()
         if staged.versions.get(target) != version:
@@ -1199,23 +1324,16 @@ class NetgearCheetahApi(NetgearBaseUiApi):
         if token:
             changes["CSRFToken"] = token
         fields = _cheetah_replay_ordered(_cheetah_form(page, "/a1"), changes)
-        form = aiohttp.FormData()
-        for name, value in fields:
-            if value is None:  # the file input's place in the form
-                form.add_field(
-                    name,
-                    image,
-                    filename=filename,
-                    content_type="application/octet-stream",
-                )
-            else:
-                form.add_field(name, value)
+        body, content_type = _multipart_upload_body(fields, filename, image)
+        # The switch buffers fast then flashes: give the upload 20..40 and
+        # leave 40..60 for the flash-write poll below.
+        payload = _ProgressUpload(body, content_type, progress, 20, 20)
 
         url = self._url(f"{_CHEETAH_UPLOAD_PATH}/a1")
         try:
             async with self._get_session().post(
                 url,
-                data=form,
+                data=payload,
                 headers={"Referer": self._url(_CHEETAH_UPLOAD_PATH)},
                 timeout=aiohttp.ClientTimeout(total=_FIRMWARE_UPLOAD_TIMEOUT),
             ) as resp:
@@ -1234,9 +1352,10 @@ class NetgearCheetahApi(NetgearBaseUiApi):
         for attempt in range(_CHEETAH_FLASH_POLL_ATTEMPTS):
             await asyncio.sleep(_CHEETAH_FLASH_POLL_SECONDS)
             if progress is not None:
-                # 20..60 across the flash window; a real wait, not a spinner,
-                # but the switch reports no byte count to scale by.
-                progress(20 + min(attempt * 40 // _CHEETAH_FLASH_POLL_ATTEMPTS, 39))
+                # 40..60 across the flash window (the upload used 20..40); a
+                # real wait, not a spinner, but the switch reports no byte
+                # count to scale by, so this tracks elapsed poll attempts.
+                progress(40 + min(attempt * 20 // _CHEETAH_FLASH_POLL_ATTEMPTS, 19))
             try:
                 if await self._async_transfer_in_progress():
                     started = True

@@ -22,6 +22,7 @@ from custom_components.netgear_poe.api_base_ui import (
     DualImageStatus,
     NetgearBaseUiApi,
 )
+from tests.conftest import parse_upload_payload
 
 
 def _cells(*values: str) -> str:
@@ -329,9 +330,25 @@ async def test_get_data_keeps_names_when_refresh_fails() -> None:
     assert data.ports[1].alias == "cached cam"
 
 
-async def test_get_data_without_ports_raises() -> None:
-    """A page with no port rows is an error, not an empty result."""
-    api = _api({"poe_port_cfg": "<html><body>Access Denied</body></html>"})
+async def test_get_data_no_ports_first_read_is_a_nonpoe_switch() -> None:
+    """An empty PoE page on the first read is a non-PoE model, not an error.
+
+    The GS108Tv2 serves an empty PoE page; it is a valid switch with no PoE,
+    so it returns empty data (and still gets a firmware-update entity) rather
+    than failing setup.
+    """
+    api = _api({"poe_port_cfg": "<html><body></body></html>"})
+    data = await api.async_get_data()
+    assert data.ports == {}
+    assert data.consumption_watts is None
+
+
+async def test_get_data_empty_after_ports_seen_raises() -> None:
+    """Once ports have been seen, a later empty page is a genuine failure."""
+    api = _api()
+    first = await api.async_get_data()
+    assert first.ports  # a normal PoE switch
+    api._request = AsyncMock(return_value="<html><body></body></html>")
     with pytest.raises(NetgearError, match="No PoE ports"):
         await api.async_get_data()
 
@@ -652,7 +669,7 @@ async def test_install_firmware_targets_inactive_slot() -> None:
     )
 
     api._async_upload_firmware.assert_awaited_once_with(
-        "image1", b"stk-bytes", "fw.stk"
+        "image1", b"stk-bytes", "fw.stk", progress.append
     )
     api._async_activate_image.assert_awaited_once_with("image1")
     api._async_reboot.assert_awaited_once()
@@ -735,8 +752,8 @@ async def test_upload_firmware_posts_multipart_to_upload_form() -> None:
 
     url = session.post.call_args.args[0]
     assert url.endswith("/base/system/http_file_download.html")
-    form = session.post.call_args.kwargs["data"]
-    names = [options["name"] for options, _headers, _value in form._fields]
+    fields = parse_upload_payload(session.post.call_args.kwargs["data"])
+    names = [name for name, _value in fields]
     # Exactly the form's own fields, in form order — anything else answers 400.
     assert names == [
         "file_type",
@@ -748,7 +765,7 @@ async def test_upload_firmware_posts_multipart_to_upload_form() -> None:
         "err_flag",
         "err_msg",
     ]
-    values = {options["name"]: value for options, _headers, value in form._fields}
+    values = dict(fields)
     assert values["file_type"] == "code"
     assert values["localfilename"] == "image1"
     assert values[".filename_handle"] == b"stk-bytes"

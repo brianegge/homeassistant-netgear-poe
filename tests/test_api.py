@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from base64 import b64decode
+from base64 import b64decode, b64encode
 from unittest.mock import AsyncMock
 
 import pytest
 
 from custom_components.netgear_poe.api import (
+    NetgearAuthError,
     NetgearError,
     NetgearPoeApi,
     encode_password,
@@ -132,6 +133,32 @@ async def test_get_info_without_firmware() -> None:
     assert info.firmware == ""
 
 
+async def test_get_info_gs310tp_field_spellings() -> None:
+    """The GS310TP names the same facts differently; both spellings work.
+
+    It sends txtSwVer (not fwVer), sysObjectOid (not sysObjectID) and a plain
+    txtVerModelName — reading only the GS728TPv2 names left firmware and
+    sysObjectID blank, which also broke LATEST_FIRMWARE lookups.
+    """
+    api = NetgearPoeApi("host", "pw")
+    api._authed_request = AsyncMock(
+        return_value={
+            "data": {
+                "sysName": "office-switch",
+                "sysProduct": "lang('login','txtModelDescpGS310TP')",
+                "txtVerModelName": "GS310TP",
+                "txtSwVer": "1.0.1.2",
+                "sysObjectOid": "1.3.6.1.4.1.4526.100.4.53",
+            }
+        }
+    )
+
+    info = await api.async_get_info()
+    assert info.model == "GS310TP"
+    assert info.firmware == "1.0.1.2"
+    assert info.sys_object_id == "1.3.6.1.4.1.4526.100.4.53"
+
+
 PORT_PORT_RESPONSE = {
     "data": {
         "ports": [
@@ -237,3 +264,122 @@ async def test_set_port_name_rejected() -> None:
     with pytest.raises(NetgearError, match="Port name set failed"):
         await api.async_set_port_name(1, "new")
     assert api._port_names[1] == "old-name"
+
+
+# A session token the switch would hand back: 32-char tabid, exponent 10001,
+# a modulus (hex) big enough to RSA-encrypt the tabid, and a trailing byte the
+# parser drops. A 1024-bit synthetic modulus is plenty for the encrypt path.
+_MODULUS = "d" * 256
+_TABID = "A" * 32
+_SESS = b64encode((_TABID + "10001" + _MODULUS + "Z").encode()).decode()
+
+
+def test_url_uses_bj4_integrity_param() -> None:
+    """The request URL carries the md5 under the modern bj4 parameter."""
+    api = NetgearPoeApi("host", "pw")
+    url = api._url("get.cgi", "sys_info")
+    assert "&bj4=" in url
+    assert "&hash=" not in url
+
+
+async def test_login_new_firmware_authid_handshake() -> None:
+    """Newer firmware returns an authId that is posted back for the session."""
+    api = NetgearPoeApi("host", "pw")
+    calls: list[tuple[str, str, str | None]] = []
+
+    async def fake_request(cgi: str, cmd: str, body: str | None = None) -> dict:
+        calls.append((cgi, cmd, body))
+        if cmd == "home_loginAuth":
+            return {"status": "ok", "authId": "deadbeef"}
+        if cmd == "home_loginStatus":
+            assert cgi == "set.cgi"
+            assert "authId=deadbeef" in (body or "")
+            return {"data": {"status": "ok", "sess": _SESS}}
+        raise AssertionError(cmd)
+
+    api._request = AsyncMock(side_effect=fake_request)
+    await api.async_login()
+
+    assert api._xsid_header is not None
+    # The session came from the POSTed authId, not a bare GET.
+    assert calls[-1][:2] == ("set.cgi", "home_loginStatus")
+    assert calls[-1][2] is not None
+
+
+async def test_login_old_firmware_get_status() -> None:
+    """Older firmware grants the session on the GET status poll (no authId)."""
+    api = NetgearPoeApi("host", "pw")
+
+    async def fake_request(cgi: str, cmd: str, body: str | None = None) -> dict:
+        if cmd == "home_loginAuth":
+            return {"status": "ok", "msgType": "save_success"}
+        if cmd == "home_loginStatus":
+            assert cgi == "get.cgi"
+            assert body is None
+            return {"data": {"status": "ok", "sess": _SESS}}
+        raise AssertionError(cmd)
+
+    api._request = AsyncMock(side_effect=fake_request)
+    await api.async_login()
+
+    assert api._xsid_header is not None
+
+
+async def test_login_falls_back_to_hash_param() -> None:
+    """A 400 on bj4 makes the driver retry and cache the hash spelling."""
+    api = NetgearPoeApi("host", "pw")
+
+    async def fake_request(cgi: str, cmd: str, body: str | None = None) -> dict:
+        if cmd == "home_loginAuth":
+            if api._hash_param == "bj4":
+                err = NetgearError("400")
+                err.status = 400
+                raise err
+            return {"status": "ok", "msgType": "save_success"}
+        if cmd == "home_loginStatus":
+            return {"data": {"status": "ok", "sess": _SESS}}
+        raise AssertionError(cmd)
+
+    api._request = AsyncMock(side_effect=fake_request)
+    await api.async_login()
+
+    assert api._hash_param == "hash"
+    assert api._xsid_header is not None
+
+
+async def test_login_does_not_flip_param_on_non_400() -> None:
+    """A transient (non-400) failure must not change the request parameter.
+
+    Flipping to "hash" on a timeout would leave a modern "bj4" switch stuck on
+    the spelling it rejects, so the error is re-raised and bj4 is preserved.
+    """
+    api = NetgearPoeApi("host", "pw")
+    attempts = 0
+
+    async def fake_request(cgi: str, cmd: str, body: str | None = None) -> dict:
+        nonlocal attempts
+        if cmd == "home_loginAuth":
+            attempts += 1
+            raise NetgearError("Request home_loginAuth failed: timeout")
+        raise AssertionError(cmd)
+
+    api._request = AsyncMock(side_effect=fake_request)
+    with pytest.raises(NetgearError):
+        await api.async_login()
+
+    assert api._hash_param == "bj4"
+    assert attempts == 1  # no alternate-spelling retry
+
+
+async def test_login_wrong_password_reports_fail() -> None:
+    """A fail status from the status poll surfaces as an auth error."""
+    api = NetgearPoeApi("host", "pw")
+
+    async def fake_request(cgi: str, cmd: str, body: str | None = None) -> dict:
+        if cmd == "home_loginAuth":
+            return {"status": "ok", "authId": "x"}
+        return {"data": {"status": "fail", "failReason": "bad"}}
+
+    api._request = AsyncMock(side_effect=fake_request)
+    with pytest.raises(NetgearAuthError):
+        await api.async_login()
