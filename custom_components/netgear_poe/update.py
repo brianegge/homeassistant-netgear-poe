@@ -60,8 +60,9 @@ def resolve_release(
 
 
 # The flashable member of Netgear's zip: .stk on the classic /base/ models,
-# .ros on the xui ones. The rest of the zip is release notes.
-_IMAGE_SUFFIXES = (".stk", ".ros")
+# .ros on the xui ones, .bix on the JSON CGI (GS310TP-class) ones. The rest of
+# the zip is release notes.
+_IMAGE_SUFFIXES = (".stk", ".ros", ".bix")
 
 
 def _extract_image(blob: bytes, url: str) -> tuple[str, bytes]:

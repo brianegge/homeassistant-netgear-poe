@@ -68,13 +68,15 @@ instantly (the poll remains a backstop for dropped UDP traps).
 Plus one **PoE power** sensor with the switch's total PoE draw in watts,
 and a **Firmware** update entity. The latest known firmware per model is
 bundled with the integration (version, download link and release notes).
-On classic HTML, legacy xui and S350 EmWeb models the entity can also
-**install** the update: it downloads the image from Netgear, flashes it to
-the switch's inactive firmware slot (the running version stays in the other
-slot as a rollback), and reboots. The reboot cuts PoE — every powered camera
-and AP — and the switch's own uplink for a minute or more, so trigger it at a
-quiet moment. JSON CGI models (GS310TP, GS110TPv3, GS728TPPv3, …) show the
-available version and release notes but have no Install button yet.
+On every backend the entity can also **install** the update: it downloads the
+image from Netgear, flashes it to the switch's inactive firmware slot (the
+running version stays in the other slot as a rollback), and reboots. The reboot
+cuts PoE — every powered camera and AP — and the switch's own uplink for a
+minute or more, so trigger it at a quiet moment. On JSON CGI models the switch
+writes to the inactive slot itself; before activating and rebooting, the
+integration re-reads the slot status and refuses to proceed unless the new
+image actually landed in the inactive slot, so the running firmware can't be
+overwritten out from under you.
 
 An install takes a few minutes to about ten, and the progress bar advances
 through the upload on every backend. Legacy xui models report the switch's
