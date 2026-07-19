@@ -1,6 +1,7 @@
 {
   "domain": "netgear_poe",
   "name": "Netgear PoE Switch",
+  "after_dependencies": ["mqtt"],
   "codeowners": ["@brianegge"],
   "config_flow": true,
   "dependencies": ["network"],

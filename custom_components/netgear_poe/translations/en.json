@@ -8,12 +8,14 @@
         "data": {
           "password": "Password",
           "community": "SNMP community (optional)",
-          "enable_traps": "Listen for SNMP traps"
+          "trap_mode": "SNMP trap source",
+          "trap_bridge_host": "Trap bridge host (MQTT mode)"
         },
         "data_description": {
           "password": "Admin password for the switch web interface",
           "community": "Read community for port link sensors (leave blank to skip)",
-          "enable_traps": "Receive instant link/PoE events on UDP 162 and register this host as a trap destination on the switch"
+          "trap_mode": "How instant link/PoE trap events reach Home Assistant: 'local' listens on UDP 162 on this host, 'mqtt' consumes an snmptrap2mqtt bridge over MQTT, 'disabled' relies on polling only",
+          "trap_bridge_host": "IP of the host running snmptrap2mqtt; registered on the switch as the trap destination when the trap source is 'mqtt'"
         }
       },
       "user": {
@@ -22,13 +24,15 @@
           "host": "Host",
           "password": "Password",
           "community": "SNMP community (optional)",
-          "enable_traps": "Listen for SNMP traps"
+          "trap_mode": "SNMP trap source",
+          "trap_bridge_host": "Trap bridge host (MQTT mode)"
         },
         "data_description": {
           "host": "Hostname or IP address of the switch",
           "password": "Admin password for the switch web interface",
           "community": "Read community for port link sensors (leave blank to skip)",
-          "enable_traps": "Receive instant link/PoE events on UDP 162 and register this host as a trap destination on the switch"
+          "trap_mode": "How instant link/PoE trap events reach Home Assistant: 'local' listens on UDP 162 on this host, 'mqtt' consumes an snmptrap2mqtt bridge over MQTT, 'disabled' relies on polling only",
+          "trap_bridge_host": "IP of the host running snmptrap2mqtt; registered on the switch as the trap destination when the trap source is 'mqtt'"
         }
       },
       "reauth_confirm": {
@@ -44,13 +48,15 @@
           "host": "Host",
           "password": "Password",
           "community": "SNMP community (optional)",
-          "enable_traps": "Listen for SNMP traps"
+          "trap_mode": "SNMP trap source",
+          "trap_bridge_host": "Trap bridge host (MQTT mode)"
         },
         "data_description": {
           "host": "Hostname or IP address of the switch",
           "password": "Admin password for the switch web interface",
           "community": "Read community for port link sensors (leave blank to skip)",
-          "enable_traps": "Receive instant link/PoE events on UDP 162 and register this host as a trap destination on the switch"
+          "trap_mode": "How instant link/PoE trap events reach Home Assistant: 'local' listens on UDP 162 on this host, 'mqtt' consumes an snmptrap2mqtt bridge over MQTT, 'disabled' relies on polling only",
+          "trap_bridge_host": "IP of the host running snmptrap2mqtt; registered on the switch as the trap destination when the trap source is 'mqtt'"
         }
       }
     },

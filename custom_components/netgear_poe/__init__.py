@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import socket
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
 from ipaddress import IPv4Interface
@@ -24,12 +25,18 @@ from .api_legacy import NetgearAnyApi, async_detect_api, async_probe_supported
 from .const import (
     CONF_COMMUNITY,
     CONF_ENABLE_TRAPS,
+    CONF_TRAP_BRIDGE_HOST,
+    CONF_TRAP_MODE,
     DISCOVERY_INTERVAL_SECONDS,
     DISCOVERY_SCAN_SECONDS,
     DOMAIN,
     PLATFORMS,
     SCAN_INTERVAL_SECONDS,
+    TRAP_MODE_DISABLED,
+    TRAP_MODE_LOCAL,
+    TRAP_MODE_MQTT,
 )
+from .mqtt_traps import async_setup_mqtt_traps
 from .nsdp import async_discover
 from .snmp import SnmpLinkMonitor
 from .trap_receiver import SnmpTrapReceiver
@@ -50,6 +57,7 @@ class NetgearPoeRuntimeData:
     sys_object_id: str
     link_monitor: SnmpLinkMonitor | None
     trap_receiver: SnmpTrapReceiver | None
+    mqtt_trap_unsub: Callable[[], None] | None
 
 
 type NetgearPoeConfigEntry = ConfigEntry[NetgearPoeRuntimeData]
@@ -116,6 +124,36 @@ def _get_source_ip(target_host: str) -> str | None:
         return None
     finally:
         sock.close()
+
+
+def resolve_trap_mode(entry: NetgearPoeConfigEntry) -> str:
+    """Effective trap mode, honoring the legacy enable_traps boolean."""
+    mode = entry.data.get(CONF_TRAP_MODE)
+    if mode is not None:
+        return mode
+    return (
+        TRAP_MODE_LOCAL
+        if entry.data.get(CONF_ENABLE_TRAPS, True)
+        else TRAP_MODE_DISABLED
+    )
+
+
+async def _async_register_bridge_destination(
+    entry: NetgearPoeConfigEntry, api: NetgearAnyApi, community: str
+) -> None:
+    """Point the switch's trap destination at the snmptrap2mqtt bridge host."""
+    bridge_host = entry.data.get(CONF_TRAP_BRIDGE_HOST)
+    if not bridge_host:
+        _LOGGER.debug("No bridge host configured; not registering a trap destination")
+        return
+    try:
+        await api.async_ensure_trap_destination(bridge_host, community)
+    except NetgearError as err:
+        _LOGGER.warning("Could not register trap destination on switch: %s", err)
+    else:
+        _LOGGER.info(
+            "Registered bridge %s as SNMP trap destination on switch", bridge_host
+        )
 
 
 async def _async_setup_traps(
@@ -312,11 +350,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: NetgearPoeConfigEntry) -
     coordinator = NetgearPoeCoordinator(hass, api, link_monitor)
     await coordinator.async_config_entry_first_refresh()
 
+    trap_mode = resolve_trap_mode(entry)
     trap_receiver: SnmpTrapReceiver | None = None
-    if community and entry.data.get(CONF_ENABLE_TRAPS, True):
+    mqtt_trap_unsub: Callable[[], None] | None = None
+    if trap_mode == TRAP_MODE_LOCAL and community:
         trap_receiver = await _async_setup_traps(
             hass, entry, api, community, coordinator
         )
+    elif trap_mode == TRAP_MODE_MQTT:
+        mqtt_trap_unsub = await async_setup_mqtt_traps(hass, entry, coordinator)
+        if community:
+            await _async_register_bridge_destination(entry, api, community)
 
     entry.runtime_data = NetgearPoeRuntimeData(
         api=api,
@@ -327,6 +371,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: NetgearPoeConfigEntry) -
         sys_object_id=info.sys_object_id,
         link_monitor=link_monitor,
         trap_receiver=trap_receiver,
+        mqtt_trap_unsub=mqtt_trap_unsub,
     )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -343,4 +388,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: NetgearPoeConfigEntry) 
             await runtime.link_monitor.async_close()
         if runtime.trap_receiver is not None:
             await runtime.trap_receiver.async_stop()
+        if runtime.mqtt_trap_unsub is not None:
+            runtime.mqtt_trap_unsub()
     return unload_ok

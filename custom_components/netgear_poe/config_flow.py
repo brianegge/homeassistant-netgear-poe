@@ -12,16 +12,29 @@ from homeassistant.const import CONF_HOST, CONF_PASSWORD
 from homeassistant.helpers.device_registry import format_mac
 from homeassistant.helpers.service_info.ssdp import SsdpServiceInfo
 
+from . import resolve_trap_mode
 from .api import NetgearAuthError, NetgearError
 from .api_legacy import async_detect_api
-from .const import CONF_COMMUNITY, CONF_ENABLE_TRAPS, DOMAIN
+from .const import (
+    CONF_COMMUNITY,
+    CONF_TRAP_BRIDGE_HOST,
+    CONF_TRAP_MODE,
+    DOMAIN,
+    TRAP_MODE_LOCAL,
+    TRAP_MODES,
+)
+
+_TRAP_SCHEMA = {
+    vol.Optional(CONF_TRAP_MODE, default=TRAP_MODE_LOCAL): vol.In(TRAP_MODES),
+    vol.Optional(CONF_TRAP_BRIDGE_HOST, default=""): str,
+}
 
 USER_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_HOST): str,
         vol.Required(CONF_PASSWORD): str,
         vol.Optional(CONF_COMMUNITY, default=""): str,
-        vol.Optional(CONF_ENABLE_TRAPS, default=True): bool,
+        **_TRAP_SCHEMA,
     }
 )
 
@@ -142,7 +155,8 @@ class NetgearPoeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_HOST: discovered[CONF_HOST],
                 CONF_PASSWORD: user_input[CONF_PASSWORD],
                 CONF_COMMUNITY: user_input.get(CONF_COMMUNITY, ""),
-                CONF_ENABLE_TRAPS: user_input.get(CONF_ENABLE_TRAPS, True),
+                CONF_TRAP_MODE: user_input.get(CONF_TRAP_MODE, TRAP_MODE_LOCAL),
+                CONF_TRAP_BRIDGE_HOST: user_input.get(CONF_TRAP_BRIDGE_HOST, ""),
             }
             title = await self._async_validate(full_input, errors)
             if title is not None:
@@ -154,7 +168,7 @@ class NetgearPoeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 {
                     vol.Required(CONF_PASSWORD): str,
                     vol.Optional(CONF_COMMUNITY, default=""): str,
-                    vol.Optional(CONF_ENABLE_TRAPS, default=True): bool,
+                    **_TRAP_SCHEMA,
                 }
             ),
             description_placeholders={
@@ -219,9 +233,13 @@ class NetgearPoeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         default=reconfigure_entry.data.get(CONF_COMMUNITY, ""),
                     ): str,
                     vol.Optional(
-                        CONF_ENABLE_TRAPS,
-                        default=reconfigure_entry.data.get(CONF_ENABLE_TRAPS, True),
-                    ): bool,
+                        CONF_TRAP_MODE,
+                        default=resolve_trap_mode(reconfigure_entry),
+                    ): vol.In(TRAP_MODES),
+                    vol.Optional(
+                        CONF_TRAP_BRIDGE_HOST,
+                        default=reconfigure_entry.data.get(CONF_TRAP_BRIDGE_HOST, ""),
+                    ): str,
                 }
             ),
             errors=errors,

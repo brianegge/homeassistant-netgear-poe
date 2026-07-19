@@ -8,7 +8,18 @@ from typing import Final
 DOMAIN: Final = "netgear_poe"
 
 CONF_COMMUNITY: Final = "community"
-CONF_ENABLE_TRAPS: Final = "enable_traps"
+CONF_ENABLE_TRAPS: Final = "enable_traps"  # legacy bool; superseded by trap_mode
+CONF_TRAP_MODE: Final = "trap_mode"
+CONF_TRAP_BRIDGE_HOST: Final = "trap_bridge_host"
+CONF_TRAP_TOPIC: Final = "trap_topic"
+
+TRAP_MODE_LOCAL: Final = "local"
+TRAP_MODE_MQTT: Final = "mqtt"
+TRAP_MODE_DISABLED: Final = "disabled"
+TRAP_MODES: Final[list[str]] = [TRAP_MODE_LOCAL, TRAP_MODE_MQTT, TRAP_MODE_DISABLED]
+
+# Base topic of the snmptrap2mqtt bridge feeding TRAP_MODE_MQTT.
+DEFAULT_TRAP_TOPIC: Final = "snmptrap2mqtt"
 
 SERVICE_SET_PORT_NAME: Final = "set_port_name"
 
