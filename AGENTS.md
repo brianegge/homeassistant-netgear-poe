@@ -2,9 +2,12 @@
 
 ## Project Overview
 
-Custom Home Assistant integration (`netgear_poe`) that controls PoE ports on
-Netgear Smart Managed Pro switches (GS7xx, e.g. GS728TPv2). PoE control uses
-the switch's web JSON CGI API; link state, port names, and traps use SNMP.
+Custom Home Assistant integration (`netgear_poe`) focused on PoE control and
+firmware management for Netgear smart switches: the Smart Managed Pro line
+(GS7xx, GS5xx, GS3xx, GS1xxT/TP) and any Plus-line switch whose web UI
+speaks one of the four supported API generations. PoE and firmware go
+through the switch's web API (JSON CGI, legacy xui XML, classic /base/
+HTML, or S350 EmWeb); link state, port names, and traps use SNMP.
 
 ## Directory Structure
 
@@ -101,8 +104,13 @@ JSON generation. Only the probe is authoritative.
 - **Link state / port names** — SNMP v2c: `ifOperStatus` (link) and `ifAlias`
   (names, same source as LibreNMS). Preferred over the web CGI for names.
 - **Instant events** — SNMP trap receiver on UDP 162 (`linkUp`/`linkDown`).
-- **Discovery** — NSDP L2 broadcast (63321/2 = Plus, 63323/4 = Pro). Only
-  Pro switches are controllable and offered for setup.
+- **Discovery** — NSDP L2 broadcast (63321/2 = Plus, 63323/4 = Pro). The
+  scan binds a socket per enabled interface and targets each subnet's
+  directed broadcast as well as 255.255.255.255 so multi-homed hosts scan
+  every subnet. Pro-port switches are offered for setup outright; Plus-port
+  switches are offered only after `async_probe_supported` confirms their web
+  UI is a generation the integration drives (ProSAFE-Plus-only models fail
+  the probe and are skipped).
 
 ## Conventions
 
