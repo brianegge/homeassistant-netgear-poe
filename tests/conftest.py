@@ -34,14 +34,6 @@ MOCK_CONFIG = {
     "host": MOCK_HOST,
     "password": MOCK_PASSWORD,
     "community": MOCK_COMMUNITY,
-    "trap_mode": "local",
-    "trap_bridge_host": "",
-}
-# Entry shape from before trap_mode existed; setup must still honor it.
-MOCK_CONFIG_LEGACY = {
-    "host": MOCK_HOST,
-    "password": MOCK_PASSWORD,
-    "community": MOCK_COMMUNITY,
     "enable_traps": True,
 }
 MOCK_SYS_NAME = "boiler-switch"
