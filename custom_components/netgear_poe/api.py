@@ -630,6 +630,18 @@ class NetgearPoeApi:
             ),
         )
 
+    async def async_reboot(self) -> None:
+        """Reboot the switch (drops PoE and the switch's uplink for ~a minute).
+
+        A cold reboot from the web UI, the recovery for a wedged PoE
+        controller or a hung SNMP agent. Establishes a session first so the
+        reboot command is authenticated, then issues it.
+        """
+        async with self._login_lock:
+            if self._xsid_header is None:
+                await self.async_login()
+        await self._async_reboot()
+
     async def _async_reboot(self) -> None:
         """Reboot the switch. Losing the connection here IS the reboot."""
         try:
