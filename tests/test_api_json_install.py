@@ -114,7 +114,7 @@ async def test_upload_posts_multipart_with_xsid_then_polls() -> None:
     api = NetgearPoeApi("host", "pw", session=session)
     api._xsid_header = "XSIDTOKEN"
     # The flash-write poll comes back done immediately.
-    api._request = AsyncMock(return_value={"data": {"status": "success"}})
+    api._authed_request = AsyncMock(return_value={"data": {"status": "success"}})
 
     await api._async_upload_firmware(b"bix-bytes", "fw.bix")
 
@@ -133,13 +133,13 @@ async def test_upload_posts_multipart_with_xsid_then_polls() -> None:
     assert values["imgName"] == "1"
     assert values["fileName"] == b"bix-bytes"
     # The status poll ran.
-    api._request.assert_awaited_with("get.cgi", "file_http_downloadStatus")
+    api._authed_request.assert_awaited_with("get.cgi", "file_http_downloadStatus")
 
 
 async def test_wait_for_upload_succeeds_after_uploading() -> None:
     """"uploading" keeps polling; "success" ends it."""
     api = NetgearPoeApi("host", "pw")
-    api._request = AsyncMock(
+    api._authed_request = AsyncMock(
         side_effect=[
             {"data": {"status": "uploading"}},
             {"data": {"status": "uploading"}},
@@ -148,19 +148,19 @@ async def test_wait_for_upload_succeeds_after_uploading() -> None:
     )
     with patch("custom_components.netgear_poe.api.asyncio.sleep", new=AsyncMock()):
         await api._async_wait_for_upload()
-    assert api._request.await_count == 3
+    assert api._authed_request.await_count == 3
 
 
 async def test_wait_for_upload_raises_on_failure_state() -> None:
     """A failure state ends the wait immediately, not at the timeout."""
     api = NetgearPoeApi("host", "pw")
-    api._request = AsyncMock(return_value={"data": {"status": "failed"}})
+    api._authed_request = AsyncMock(return_value={"data": {"status": "failed"}})
     with (
         patch("custom_components.netgear_poe.api.asyncio.sleep", new=AsyncMock()),
         pytest.raises(NetgearError, match="Firmware write failed"),
     ):
         await api._async_wait_for_upload()
-    assert api._request.await_count == 1
+    assert api._authed_request.await_count == 1
 
 
 # --- activate ---------------------------------------------------------------
