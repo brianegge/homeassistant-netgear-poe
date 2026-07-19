@@ -89,11 +89,18 @@ class NetgearPoeCoordinator(DataUpdateCoordinator[PoeData]):
             # Tell a wedged PoE controller apart from an unreachable switch: if
             # the management plane still answers a cheap identity read, the PoE
             # telemetry query is hanging on its own (a firmware fault cleared by
-            # a cold power-cycle). Keep the device available with its last-known
-            # PoE figures — power is still being delivered while only the
-            # readout is stuck — and raise the problem flag instead of blacking
-            # every entity out. A switch that answers neither is genuinely down.
-            if self.data is not None and await self._switch_reachable():
+            # a cold power-cycle). Keep the device available and raise the
+            # problem flag instead of blacking every entity out. A switch that
+            # answers neither read is genuinely down.
+            #
+            # This also covers a switch already wedged at startup: the first
+            # refresh has no last-known data, so fall back to empty PoE data
+            # rather than failing setup — that keeps the device-level entities
+            # (the Reboot button and this stall sensor) available, which is the
+            # only way to recover the switch from Home Assistant. On a
+            # already-running switch the last-known PoE figures are kept, since
+            # power is still being delivered while only the readout is stuck.
+            if await self._switch_reachable():
                 self._poe_stall_count += 1
                 if self._poe_stall_count == POE_STALL_THRESHOLD:
                     self.poe_stalled = True
@@ -104,8 +111,9 @@ class NetgearPoeCoordinator(DataUpdateCoordinator[PoeData]):
                         self.api.host,
                         self._poe_stall_count,
                     )
-                await self._apply_link_info(self.data)
-                return self.data
+                data = self.data if self.data is not None else PoeData()
+                await self._apply_link_info(data)
+                return data
             self._reset_stall()
             raise UpdateFailed(
                 translation_domain=DOMAIN,

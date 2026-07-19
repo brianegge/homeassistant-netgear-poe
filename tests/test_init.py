@@ -140,3 +140,31 @@ async def test_poe_read_failure_when_unreachable_marks_unavailable(
     await coordinator.async_refresh()
     assert coordinator.last_update_success is False
     assert coordinator.poe_stalled is False
+
+
+async def test_setup_succeeds_when_poe_wedged_at_startup(
+    hass: HomeAssistant,
+    mock_api: MagicMock,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """A switch wedged before HA starts still loads, so it can be rebooted.
+
+    The PoE read hangs from the very first refresh, but the switch answers
+    management reads. Rather than failing setup (which would hide the Reboot
+    button behind a never-ready entry), the entry loads with empty PoE data:
+    the device-level Reboot button and stall sensor come up so the switch can
+    be recovered, while per-port entities (nothing to read) are absent.
+    """
+    mock_api.async_get_data.side_effect = NetgearError("timeout")
+
+    await setup_integration(hass, mock_config_entry)
+
+    assert mock_config_entry.state is ConfigEntryState.LOADED
+    # The recovery controls are present...
+    assert hass.states.get("button.boiler_switch_reboot") is not None
+    assert (
+        hass.states.get("binary_sensor.boiler_switch_poe_controller_stalled")
+        is not None
+    )
+    # ...while per-port entities, which need PoE data, are not created yet.
+    assert hass.states.get("switch.boiler_switch_port_1_driveway_cam_poe") is None
