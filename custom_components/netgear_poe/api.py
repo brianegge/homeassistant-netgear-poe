@@ -41,6 +41,12 @@ _SET_CGI = "set.cgi"
 # Firmware install. The switch writes flash while the upload POST is in flight
 # and then reports progress only as coarse state strings, so the byte upload
 # drives the progress bar and the flash-write phase is polled without a percent.
+# Firmware is uploaded to this bare CGI (no query string); the multipart
+# imgName names the target (inactive) slot. get.cgi?cmd=file_http_download is
+# only the precheck — the image POST goes here. Confirmed from packet captures
+# on 1.0.0.9, 1.0.1.2, 1.0.5.12 and GS728TPPv3 6.2.x, which all use this path.
+_UPLOAD_PATH = "/cgi-bin/httpupload.cgi"
+
 _FIRMWARE_UPLOAD_TIMEOUT = 600
 _DOWNLOAD_STATUS_POLL_SECONDS = 3
 # 600 s / 3 s: a flash write can take several minutes on these switches.
@@ -543,6 +549,7 @@ class NetgearPoeApi:
     async def _async_upload_firmware(
         self,
         image: bytes,
+        target: str,
         filename: str,
         progress: Callable[[int], None] | None = None,
     ) -> None:
@@ -550,21 +557,23 @@ class NetgearPoeApi:
 
         Posted directly rather than through _request: the body is multipart and
         the switch writes flash while reading it, so it needs its own generous
-        timeout. imgName is the constant "1" — the switch chooses the inactive
-        slot itself (see async_install_firmware, which verifies where it landed
-        before doing anything irreversible). The byte upload drives the bar
-        (20..60); the flash-write phase reports only state strings, so it is
-        polled without moving the bar further.
+        timeout. imgName names the target (inactive) slot — "1" or "2", not a
+        constant — so the running firmware is never the one overwritten;
+        async_install_firmware then verifies where the image landed before
+        doing anything irreversible. xsrf is the literal string the form
+        carries (the real token is the X-CSRF-XSID header). The byte upload
+        drives the bar (20..60); the flash-write phase reports only state
+        strings, so it is polled without moving the bar further.
         """
-        # Field order mirrors the switch's own upload form. The None marks the
-        # file part. xsrf here is the literal string the form carries; the real
-        # token is the X-CSRF-XSID header, added below.
+        slot = "2" if target == "image2" else "1"
         fields: list[tuple[str, str | None]] = [
             ("fileType", "0"),
             ("xsrf", "undefined"),
-            ("imgName", "1"),
+            ("imgName", slot),
             ("fileName", None),
         ]
+        url = f"{self._scheme}://{self.host}{_UPLOAD_PATH}"
+
         body, content_type = _multipart_upload_body(fields, filename, image)
         payload = _ProgressUpload(body, content_type, progress, 20, 40)
 
@@ -576,7 +585,7 @@ class NetgearPoeApi:
             headers["X-CSRF-XSID"] = self._xsid_header
         try:
             async with self._get_session().post(
-                self._url(_SET_CGI, "file_http_download"),
+                url,
                 data=payload,
                 headers=headers,
                 timeout=aiohttp.ClientTimeout(total=_FIRMWARE_UPLOAD_TIMEOUT),
@@ -726,7 +735,7 @@ class NetgearPoeApi:
             before.current_active,
         )
         report(20)
-        await self._async_upload_firmware(image, filename, progress)
+        await self._async_upload_firmware(image, target, filename, progress)
         await self._async_verify_staged(target, version)
         report(60)
 

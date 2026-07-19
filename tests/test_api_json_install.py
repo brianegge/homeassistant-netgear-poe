@@ -108,18 +108,19 @@ def _upload_session() -> MagicMock:
     return session
 
 
-async def test_upload_posts_multipart_with_xsid_then_polls() -> None:
-    """The upload posts file_http_download with the form's fields + XSID."""
+async def test_upload_posts_to_httpupload_cgi_then_polls() -> None:
+    """Upload posts the image to the bare httpupload.cgi with the slot in imgName."""
     session = _upload_session()
     api = NetgearPoeApi("host", "pw", session=session)
     api._xsid_header = "XSIDTOKEN"
     # The flash-write poll comes back done immediately.
     api._authed_request = AsyncMock(return_value={"data": {"status": "success"}})
 
-    await api._async_upload_firmware(b"bix-bytes", "fw.bix")
+    await api._async_upload_firmware(b"bix-bytes", "image2", "fw.bix")
 
     url = session.post.call_args.args[0]
-    assert "cmd=file_http_download" in url
+    assert url.endswith("/cgi-bin/httpupload.cgi")
+    assert "cmd=" not in url  # bare CGI, no query string
     headers = session.post.call_args.kwargs["headers"]
     assert headers["X-CSRF-XSID"] == "XSIDTOKEN"
     assert headers["X-Requested-With"] == "XMLHttpRequest"
@@ -130,10 +131,23 @@ async def test_upload_posts_multipart_with_xsid_then_polls() -> None:
     values = dict(fields)
     assert values["fileType"] == "0"
     assert values["xsrf"] == "undefined"
-    assert values["imgName"] == "1"
+    assert values["imgName"] == "2"  # the inactive slot number, not a constant
     assert values["fileName"] == b"bix-bytes"
     # The status poll ran.
     api._authed_request.assert_awaited_with("get.cgi", "file_http_downloadStatus")
+
+
+async def test_upload_targets_the_named_slot() -> None:
+    """imgName follows the target slot so the running image is never overwritten."""
+    session = _upload_session()
+    api = NetgearPoeApi("host", "pw", session=session)
+    api._xsid_header = "X"
+    api._authed_request = AsyncMock(return_value={"data": {"status": "success"}})
+
+    await api._async_upload_firmware(b"img", "image1", "fw.bix")
+    assert dict(parse_upload_payload(session.post.call_args.kwargs["data"]))[
+        "imgName"
+    ] == "1"
 
 
 async def test_wait_for_upload_succeeds_after_uploading() -> None:
@@ -281,7 +295,7 @@ async def test_install_uploads_verifies_activates_reboots() -> None:
     )
 
     api._async_upload_firmware.assert_awaited_once_with(
-        b"bix", "fw.bix", progress.append
+        b"bix", "image2", "fw.bix", progress.append
     )
     api._async_activate_image.assert_awaited_once_with("1.0.5.12")
     api._async_reboot.assert_awaited_once()
