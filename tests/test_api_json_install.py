@@ -295,7 +295,7 @@ async def test_install_uploads_verifies_activates_reboots() -> None:
 
 
 async def test_install_stops_when_upload_not_recorded() -> None:
-    """If the inactive slot did not take the new version, do not proceed."""
+    """If neither slot took the new version, do not proceed."""
     api = NetgearPoeApi("host", "pw")
     unchanged = _dis("1.0.1.2", "1.0.0.9", "image1")
     api.async_get_image_status = AsyncMock(side_effect=[unchanged, unchanged])
@@ -303,11 +303,35 @@ async def test_install_stops_when_upload_not_recorded() -> None:
     api._async_activate_image = AsyncMock()
     api._async_reboot = AsyncMock()
 
-    with pytest.raises(NetgearError, match=r"expected 1\.0\.5\.12"):
+    with pytest.raises(NetgearError, match=r"no slot reports 1\.0\.5\.12"):
         await api.async_install_firmware(b"bix", "1.0.5.12", filename="fw.bix")
 
     api._async_activate_image.assert_not_awaited()
     api._async_reboot.assert_not_awaited()
+
+
+async def test_install_ok_when_image_lands_in_active_slot() -> None:
+    """Some firmware overwrites the ACTIVE slot; verify by version, not slot.
+
+    Running image2; the upload lands in image2 (active) and the other slot
+    keeps the older rollback. next-active already points at image2, so the
+    version-based guards pass and the install completes.
+    """
+    api = NetgearPoeApi("host", "pw")
+    api.async_get_image_status = AsyncMock(
+        side_effect=[
+            _dis("1.0.0.9", "1.0.1.2", "image2", "image2"),  # before
+            _dis("1.0.0.9", "1.0.5.12", "image2", "image2"),  # after upload
+            _dis("1.0.0.9", "1.0.5.12", "image2", "image2"),  # after activate
+        ]
+    )
+    api._async_upload_firmware = AsyncMock()
+    api._async_activate_image = AsyncMock()
+    api._async_reboot = AsyncMock()
+    api._async_wait_for_firmware = AsyncMock()
+
+    await api.async_install_firmware(b"bix", "1.0.5.12", filename="fw.bix")
+    api._async_reboot.assert_awaited_once()
 
 
 async def test_install_stops_when_activation_did_not_stick() -> None:

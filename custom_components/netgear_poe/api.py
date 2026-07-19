@@ -682,27 +682,36 @@ class NetgearPoeApi:
             + (f" (last reported {observed})" if observed else "")
         )
 
-    async def _async_verify_staged(self, target: str, version: str) -> None:
-        """Fail-closed: confirm the upload landed in the inactive slot.
+    async def _async_verify_staged(self, version: str) -> None:
+        """Fail-closed: confirm some slot now holds the new version.
 
-        This backend's slot targeting was reverse-engineered from a packet
-        capture and is NOT verified against a live flash, so before anything
-        irreversible the image status is re-read and this raises unless the
-        expected inactive slot now holds the new version — a wrong-slot
-        assumption or an overwritten running image stops the install here.
+        Which physical slot the switch writes is not predictable — on one
+        GS310TP the image landed in the inactive slot, on another it overwrote
+        the active one — so this checks by version, not by slot. If the upload
+        reported success but neither slot reports the new version, it never got
+        stored; raise rather than activate or reboot.
         """
         staged = await self.async_get_image_status()
-        if staged.versions.get(target) != version:
+        if version not in staged.versions.values():
             raise NetgearError(
-                f"Upload finished but slot {target} reports "
-                f"{staged.versions.get(target) or 'nothing'}, expected {version}; "
-                "refusing to activate or reboot"
+                f"Upload finished but no slot reports {version} "
+                f"(slots: {staged.versions}); refusing to activate or reboot"
             )
 
-    async def _async_verify_boot_slot(self, target: str) -> None:
-        """Confirm activation moved the next-boot pointer to `target`."""
-        if (await self.async_get_image_status()).next_active != target:
-            raise NetgearError(f"Could not make {target} the boot image")
+    async def _async_verify_boot_slot(self, version: str) -> None:
+        """Confirm the switch will boot the new version next.
+
+        file_dualConf selects the slot by its version descriptor, so verify the
+        next-active slot actually holds `version` — an activation that silently
+        did nothing (or picked the wrong slot) stops here.
+        """
+        status = await self.async_get_image_status()
+        if status.versions.get(status.next_active) != version:
+            raise NetgearError(
+                f"Could not make the {version} image the boot image "
+                f"(next-active {status.next_active} holds "
+                f"{status.versions.get(status.next_active)})"
+            )
 
     async def async_install_firmware(
         self,
@@ -711,14 +720,16 @@ class NetgearPoeApi:
         filename: str,
         progress: Callable[[int], None] | None = None,
     ) -> None:
-        """Install a firmware image: upload, verify slot, activate, reboot.
+        """Install a firmware image: upload, verify, activate, reboot.
 
-        The switch writes the upload to the INACTIVE slot itself (imgName is a
-        constant "1"), so the running firmware stays flashed as a rollback. The
+        The switch writes the upload (imgName is the constant "1") and picks
+        the slot itself — usually the inactive one, but on some firmware it
+        overwrites the active slot, leaving the other slot as an older
+        rollback. Either way the checks are by version, not slot (see the
+        verify helpers), and are fail-closed: nothing irreversible happens
+        unless the new version is actually stored and set to boot next. The
         final reboot drops PoE — and the switch's own link — for around a
         minute. `version` must match what the image reports after flashing.
-        The slot and boot-pointer checks are fail-closed (see the verify
-        helpers): a wrong-slot assumption aborts before anything irreversible.
         """
 
         def report(percent: int) -> None:
@@ -726,30 +737,23 @@ class NetgearPoeApi:
                 progress(percent)
 
         before = await self.async_get_image_status()
-        target = before.inactive
         _LOGGER.info(
-            "Uploading firmware %s to %s slot %s (running %s from %s)",
+            "Uploading firmware %s to %s (running %s from %s)",
             version,
             self.host,
-            target,
             before.versions.get(before.current_active, "?"),
             before.current_active,
         )
         report(20)
         await self._async_upload_firmware(image, filename, progress)
-        await self._async_verify_staged(target, version)
+        await self._async_verify_staged(version)
         report(60)
 
         await self._async_activate_image(version)
-        await self._async_verify_boot_slot(target)
+        await self._async_verify_boot_slot(version)
         report(70)
 
-        _LOGGER.info(
-            "Rebooting %s into %s (%s); PoE will drop briefly",
-            self.host,
-            target,
-            version,
-        )
+        _LOGGER.info("Rebooting %s into %s; PoE will drop briefly", self.host, version)
         await self._async_reboot()
         report(80)
         await self._async_wait_for_firmware(version, progress)
