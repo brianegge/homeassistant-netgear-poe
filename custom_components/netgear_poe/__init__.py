@@ -7,7 +7,9 @@ import logging
 import socket
 from dataclasses import dataclass
 from datetime import timedelta
+from ipaddress import IPv4Interface
 
+from homeassistant.components import network
 from homeassistant.config_entries import SOURCE_INTEGRATION_DISCOVERY, ConfigEntry
 from homeassistant.const import CONF_HOST, CONF_PASSWORD, EVENT_HOMEASSISTANT_STARTED
 from homeassistant.core import Event, HomeAssistant, callback
@@ -18,7 +20,7 @@ from homeassistant.helpers.typing import ConfigType
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import NetgearAuthError, NetgearError, PoeData
-from .api_legacy import NetgearAnyApi, async_detect_api
+from .api_legacy import NetgearAnyApi, async_detect_api, async_probe_supported
 from .const import (
     CONF_COMMUNITY,
     CONF_ENABLE_TRAPS,
@@ -150,15 +152,52 @@ async def _async_setup_traps(
     return receiver
 
 
+async def _async_scan_addrs(
+    hass: HomeAssistant,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Broadcast targets and local bind addresses for the NSDP scan.
+
+    The global 255.255.255.255 only leaves via the default-route interface,
+    so on a multi-homed host (VLANs, Docker, a second NIC) switches on any
+    other subnet never hear the request. Returns (broadcast_addrs,
+    local_addrs): the global broadcast plus each interface's subnet-directed
+    one, and each interface's own IP so the scanner can also bind a socket
+    per interface like Netgear's discovery tools do.
+    """
+    broadcast = {"255.255.255.255"}
+    local: set[str] = set()
+    try:
+        adapters = await network.async_get_adapters(hass)
+    except Exception:  # discovery must survive without adapter enumeration
+        _LOGGER.debug("Could not enumerate network adapters", exc_info=True)
+        return tuple(broadcast), ()
+    for adapter in adapters:
+        if not adapter["enabled"]:
+            continue
+        for ip in adapter["ipv4"]:
+            iface = IPv4Interface(f"{ip['address']}/{ip['network_prefix']}")
+            # /31, /32 and loopback have no usable directed broadcast.
+            if iface.ip.is_loopback or iface.network.prefixlen >= 31:
+                continue
+            broadcast.add(str(iface.network.broadcast_address))
+            local.add(str(iface.ip))
+    return tuple(sorted(broadcast)), tuple(sorted(local))
+
+
 async def _async_run_discovery(hass: HomeAssistant) -> None:
-    """Run one NSDP scan and offer any new Pro switches for setup."""
+    """Run one NSDP scan and offer any new supported switches for setup."""
     configured = {
         entry.unique_id
         for entry in hass.config_entries.async_entries(DOMAIN)
         if entry.unique_id
     }
     try:
-        switches = await async_discover(duration=DISCOVERY_SCAN_SECONDS)
+        broadcast_addrs, local_addrs = await _async_scan_addrs(hass)
+        switches = await async_discover(
+            duration=DISCOVERY_SCAN_SECONDS,
+            broadcast_addrs=broadcast_addrs,
+            local_addrs=local_addrs,
+        )
     except Exception:
         _LOGGER.debug("NSDP discovery scan failed", exc_info=True)
         return
@@ -168,8 +207,19 @@ async def _async_run_discovery(hass: HomeAssistant) -> None:
         ", ".join(f"{s.name}/{s.model}" for s in switches),
     )
     for switch in switches:
-        # Only offer switches this integration's web API can actually drive.
-        if not switch.is_pro or format_mac(switch.mac) in configured:
+        if format_mac(switch.mac) in configured:
+            continue
+        # Pro-port switches always run a supported web API. Plus-port
+        # switches are a mix — base-UI/cheetah generations are supported,
+        # ProSAFE-Plus-only models are not — so probe the web UI first.
+        if not switch.is_pro and not await async_probe_supported(switch.host):
+            _LOGGER.debug(
+                "NSDP found %s (%s) at %s but its web UI is not a "
+                "supported generation; skipping",
+                switch.name or switch.mac,
+                switch.model,
+                switch.host,
+            )
             continue
         _LOGGER.info(
             "NSDP discovered %s (%s) at %s — offering setup",

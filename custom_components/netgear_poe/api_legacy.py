@@ -668,6 +668,31 @@ async def async_detect_api(
     )
 
 
+async def async_probe_supported(
+    host: str, session: aiohttp.ClientSession | None = None
+) -> bool:
+    """Whether the host's web UI is a generation this integration drives.
+
+    NSDP discovery uses this to filter switches found on the "Plus" port
+    pair, which spans both supported web UIs (base-UI GS110TP, cheetah
+    GS324TP) and ProSAFE-Plus-only models with no drivable UI at all.
+    Returns False instead of raising so a scan never blows up on one host.
+    """
+    try:
+        api = await async_detect_api(host, "", session=session)
+    except NetgearError:
+        return False
+    try:
+        # The xui/cheetah/base-UI generations are recognized positively by
+        # their login pages; the JSON CGI is detection's fallback for any
+        # unknown page, so it has to prove the CGI answers.
+        if not isinstance(api, NetgearPoeApi):
+            return True
+        return await api.async_probe()
+    finally:
+        await api.async_close()
+
+
 async def _probe_root(
     host: str, probe_session: aiohttp.ClientSession
 ) -> tuple[bool, re.Match[str] | None, str]:

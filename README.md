@@ -1,9 +1,15 @@
 # Netgear PoE Switch for Home Assistant
 
-Control PoE power on Netgear Smart Managed Pro switches (e.g. GS728TPv2,
-GS516TP, GS110TP, GS324TP) from Home Assistant, using the switch's web
-management API. Built to power-cycle stubborn PoE devices (cameras, APs)
-from automations.
+PoE control and firmware management for Netgear smart switches from Home
+Assistant, using the switch's web management API. Built to power-cycle
+stubborn PoE devices (cameras, APs) from automations, and to keep a fleet
+of switches on current firmware without visiting each web UI.
+
+Supported hardware is the **Smart Managed Pro** line (e.g. GS728TPv2,
+GS516TP, GS110TP, GS324TP) plus **some Plus-line switches** — any Plus
+model whose web UI speaks one of the four API generations below works too;
+ProSAFE-Plus-only models (configured solely via the ProSAFE utility, e.g.
+GS105Ev2, GS108PEv3) do not.
 
 Note: these switches expose only read-only MIB-2 over SNMP, so PoE control
 goes through the same web API the switch's UI uses. Four firmware
@@ -108,13 +114,24 @@ Netgear's own NSDP protocol (the same one the ProSAFE utility uses), so
 they appear under **Settings → Devices & Services** as "Discovered → Add"
 cards with the host pre-filled — you only enter the admin password.
 
-Only **Smart Managed Pro** switches (e.g. GS728TPv2, GS516TP, GS110TP) are
-offered, since those are the models this integration's web APIs can control. The
-"Plus" line (GS10xPE, JGSxxPE) speaks NSDP too but uses a different web UI
-and is deliberately skipped. NSDP is an L2 broadcast, so it only finds
-switches on Home Assistant's own subnet, and switches answer
+Switches that answer NSDP on the "Smart Managed Pro" port pair are offered
+outright. Switches that answer only on the "Plus" port pair are a mix of
+supported and unsupported web UIs, so discovery probes each one's web UI
+and only offers those running a generation this integration can control;
+ProSAFE-Plus-only models are skipped.
+
+The scan binds a socket on every enabled interface and targets each
+subnet's directed broadcast as well as 255.255.255.255, so a multi-homed
+Home Assistant host (VLANs, a second NIC) finds switches on all of its
+subnets, not just the default route's. NSDP is an L2 broadcast, so only
+directly attached subnets are scanned, and switches answer
 probabilistically — a newly powered switch may take up to a minute to
 appear.
+
+Some models never answer NSDP at all — the GS728TPPv3 for one — but
+announce themselves over **SSDP/UPnP** as `NETGEAR Switch`. Those are
+picked up through Home Assistant's built-in SSDP discovery and offered
+the same way.
 
 Discovery runs automatically once any switch is configured (to surface the
 rest). To discover the **first** switch without adding one manually, add

@@ -103,6 +103,40 @@ async def test_get_data_populates_port_names() -> None:
     assert data.consumption_watts == 6.5
 
 
+async def test_probe_answers_json() -> None:
+    """Newer firmware answering the unauth home_login read means present."""
+    api = NetgearPoeApi("host", "pw")
+    api._request = AsyncMock(return_value={"data": {"title": "NETGEAR"}})
+
+    assert await api.async_probe() is True
+    api._request.assert_awaited_once_with("get.cgi", "home_login")
+    assert api._hash_param == "bj4"
+
+
+async def test_probe_falls_back_to_old_dialect() -> None:
+    """Older firmware 400s home_login but answers home_loginStatus w/ hash."""
+    api = NetgearPoeApi("host", "pw")
+    api._request = AsyncMock(
+        side_effect=[NetgearError("400"), {"data": {"status": "authing"}}]
+    )
+
+    assert await api.async_probe() is True
+    assert api._request.await_args_list == [
+        (("get.cgi", "home_login"),),
+        (("get.cgi", "home_loginStatus"),),
+    ]
+    # The flip is kept so a follow-up login speaks the dialect that worked.
+    assert api._hash_param == "hash"
+
+
+async def test_probe_no_cgi() -> None:
+    """A host without the JSON CGI (404 / HTML answers) probes False."""
+    api = NetgearPoeApi("host", "pw")
+    api._request = AsyncMock(side_effect=NetgearError("Non-JSON response"))
+
+    assert await api.async_probe() is False
+
+
 async def test_get_info_parses_firmware() -> None:
     """sys_info maps sysName, the model lang key and fwVer."""
     api = NetgearPoeApi("host", "pw")
