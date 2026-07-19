@@ -58,6 +58,12 @@ For each PoE port the integration creates:
   native PoE reset; legacy xui, classic HTML and S350 EmWeb models toggle PoE
   off and back on.
 
+There is also a device-level **Reboot** button that restarts the whole switch
+via its web UI — the recovery for a wedged PoE controller or a hung SNMP agent
+(see the **PoE controller stalled** sensor below). A reboot drops PoE — every
+powered camera and AP — and the switch's own uplink for a minute or more, so
+it is a deliberate, disruptive action; press it during a quiet window.
+
 With an SNMP community configured, you also get a per-port **link**
 binary sensor (`connectivity`) from IF-MIB `ifOperStatus`, polled every
 30 s. Enable **Listen for SNMP traps** and the integration also opens a

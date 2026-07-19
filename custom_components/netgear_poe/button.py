@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import logging
 
-from homeassistant.components.button import ButtonEntity
+from homeassistant.components.button import ButtonDeviceClass, ButtonEntity
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import NetgearPoeConfigEntry, NetgearPoeCoordinator
 from .api import NetgearError
 from .const import DOMAIN
-from .entity import NetgearPoePortEntity
+from .entity import NetgearPoeEntity, NetgearPoePortEntity
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -24,12 +25,49 @@ async def async_setup_entry(
     entry: NetgearPoeConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up PoE power-cycle buttons from a config entry."""
+    """Set up the reboot button and per-port PoE power-cycle buttons."""
     coordinator = entry.runtime_data.coordinator
-    async_add_entities(
+    entities: list[ButtonEntity] = [NetgearRebootButton(coordinator, entry)]
+    entities.extend(
         NetgearPoePowerCycleButton(coordinator, entry, port)
         for port in sorted(coordinator.data.ports)
     )
+    async_add_entities(entities)
+
+
+class NetgearRebootButton(NetgearPoeEntity, ButtonEntity):
+    """Button that reboots the whole switch via its web UI.
+
+    The recovery for a wedged PoE controller or a hung SNMP agent. A reboot
+    drops PoE — every powered camera and AP — and the switch's own uplink for
+    a minute or more, so it is a deliberate, disruptive action.
+    """
+
+    _attr_device_class = ButtonDeviceClass.RESTART
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_translation_key = "reboot"
+
+    def __init__(
+        self,
+        coordinator: NetgearPoeCoordinator,
+        entry: NetgearPoeConfigEntry,
+    ) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_reboot"
+
+    async def async_press(self) -> None:
+        """Reboot the switch."""
+        api = self.coordinator.api
+        _LOGGER.info("Rebooting switch %s", api.host)
+        try:
+            await api.async_reboot()
+        except NetgearError as err:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="reboot_failed",
+                translation_placeholders={"host": api.host, "error": str(err)},
+            ) from err
 
 
 class NetgearPoePowerCycleButton(NetgearPoePortEntity, ButtonEntity):
