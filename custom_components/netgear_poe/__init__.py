@@ -168,7 +168,7 @@ async def _async_scan_addrs(
     local: set[str] = set()
     try:
         adapters = await network.async_get_adapters(hass)
-    except Exception:  # noqa: BLE001 — discovery must survive without this
+    except Exception:  # discovery must survive without adapter enumeration
         _LOGGER.debug("Could not enumerate network adapters", exc_info=True)
         return tuple(broadcast), ()
     for adapter in adapters:

@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 from homeassistant import config_entries
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.helpers.service_info.ssdp import SsdpServiceInfo
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.netgear_poe.const import DOMAIN
@@ -111,22 +112,20 @@ async def test_discovery_flow_dedupes_configured(
     assert result["reason"] == "already_configured"
 
 
-def _ssdp_info(host: str, mac_hex: str) -> "SsdpServiceInfo":
+def _ssdp_info(host: str, mac_hex: str) -> SsdpServiceInfo:
     """An SsdpServiceInfo shaped like a real GS728TPPv3 announcement."""
-    from homeassistant.helpers.service_info.ssdp import SsdpServiceInfo
-
     return SsdpServiceInfo(
         ssdp_usn=f"uuid:fb8e67ba-7dba-11e7-be55-{mac_hex}::"
         "urn:schemas-upnp-org:device:InternetGatewayDevice:1",
         ssdp_st="urn:schemas-upnp-org:device:InternetGatewayDevice:1",
-        ssdp_location=f"http://{host}:44291/rootDesc.xml",
+        ssdp_location=f"http://{host}:44291/rootDesc.xml",  # NOSONAR — mock
         upnp={
             "UDN": f"uuid:fb8e67ba-7dba-11e7-be55-{mac_hex}",
             "friendlyName": "GS728TPPv3-BBE5C2",
             "manufacturer": "NETGEAR",
             "modelDescription": "NETGEAR Switch",
             "modelName": "GS728TPPv3",
-            "presentationURL": f"http://{host}/",
+            "presentationURL": f"http://{host}/",  # NOSONAR — mock
         },
     )
 
@@ -250,7 +249,9 @@ async def test_scanner_offers_pro_and_probed_plus_switches(
     created: list[dict] = []
     probed: list[str] = []
 
-    async def fake_probe(host: str) -> bool:
+    def fake_probe(host: str) -> bool:
+        # A plain function: patch() wraps async_probe_supported in an
+        # AsyncMock, which awaits the side_effect's return value itself.
         probed.append(host)
         return host == "192.168.254.251"
 

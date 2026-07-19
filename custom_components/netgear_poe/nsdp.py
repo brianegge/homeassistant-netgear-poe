@@ -128,6 +128,54 @@ class _NsdpProtocol(asyncio.DatagramProtocol):
         _LOGGER.debug("NSDP socket error: %s", exc)
 
 
+# (transport, send port, send addresses)
+type _SendTarget = tuple[asyncio.DatagramTransport, int, tuple[str, ...]]
+
+
+async def _async_open_sockets(
+    found: dict[str, NsdpSwitch],
+    broadcast_addrs: tuple[str, ...],
+    local_addrs: tuple[str, ...],
+) -> list[_SendTarget]:
+    """Open the scan sockets and pair each with the addresses it sends to.
+
+    Per port pair: a wildcard socket (receives broadcast replies, sends to
+    every broadcast address) plus one socket per local IP (sends the global
+    broadcast out its own interface and catches unicast replies).
+    """
+    loop = asyncio.get_running_loop()
+    transports: list[_SendTarget] = []
+    for listen_port, send_port, is_pro in _PORT_PAIRS:
+        for local_ip in ("0.0.0.0", *local_addrs):
+            try:
+                transport, _ = await loop.create_datagram_endpoint(
+                    lambda pro=is_pro: _NsdpProtocol(pro, found),
+                    local_addr=(local_ip, listen_port),
+                    allow_broadcast=True,
+                    reuse_port=True,
+                )
+            except OSError as err:
+                _LOGGER.warning(
+                    "NSDP cannot bind UDP %s:%d: %s", local_ip, listen_port, err
+                )
+                continue
+            addrs = broadcast_addrs if local_ip == "0.0.0.0" else ("255.255.255.255",)
+            transports.append((transport, send_port, addrs))
+    return transports
+
+
+def _send_burst(transports: list[_SendTarget], seq: int) -> int:
+    """Send one request burst on every socket; returns the next sequence."""
+    for transport, send_port, addrs in transports:
+        for addr in addrs:
+            try:
+                transport.sendto(_build_request(seq), (addr, send_port))
+                seq += 1
+            except OSError as err:
+                _LOGGER.debug("NSDP send failed: %s", err)
+    return seq
+
+
 async def async_discover(
     duration: float = 30.0,
     burst_interval: float = 5.0,
@@ -149,26 +197,7 @@ async def async_discover(
     """
     loop = asyncio.get_running_loop()
     found: dict[str, NsdpSwitch] = {}
-    # (transport, send port, send addresses)
-    transports: list[tuple[asyncio.DatagramTransport, int, tuple[str, ...]]] = []
-
-    for listen_port, send_port, is_pro in _PORT_PAIRS:
-        for local_ip in ("0.0.0.0", *local_addrs):
-            try:
-                transport, _ = await loop.create_datagram_endpoint(
-                    lambda pro=is_pro: _NsdpProtocol(pro, found),
-                    local_addr=(local_ip, listen_port),
-                    allow_broadcast=True,
-                    reuse_port=True,
-                )
-            except OSError as err:
-                _LOGGER.warning(
-                    "NSDP cannot bind UDP %s:%d: %s", local_ip, listen_port, err
-                )
-                continue
-            addrs = broadcast_addrs if local_ip == "0.0.0.0" else ("255.255.255.255",)
-            transports.append((transport, send_port, addrs))
-
+    transports = await _async_open_sockets(found, broadcast_addrs, local_addrs)
     if not transports:
         return []
 
@@ -176,13 +205,7 @@ async def async_discover(
         seq = 1
         deadline = loop.time() + duration
         while loop.time() < deadline:
-            for transport, send_port, addrs in transports:
-                for addr in addrs:
-                    try:
-                        transport.sendto(_build_request(seq), (addr, send_port))
-                        seq += 1
-                    except OSError as err:
-                        _LOGGER.debug("NSDP send failed: %s", err)
+            seq = _send_burst(transports, seq)
             await asyncio.sleep(min(burst_interval, max(0.0, deadline - loop.time())))
     finally:
         for transport, _, _ in transports:
