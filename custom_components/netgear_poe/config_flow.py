@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlparse
 
 import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.config_entries import ConfigFlowResult
 from homeassistant.const import CONF_HOST, CONF_PASSWORD
 from homeassistant.helpers.device_registry import format_mac
+from homeassistant.helpers.service_info.ssdp import SsdpServiceInfo
 
 from .api import NetgearAuthError, NetgearError
 from .api_legacy import async_detect_api
@@ -81,6 +83,38 @@ class NetgearPoeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self, discovery_info: dict[str, Any]
     ) -> ConfigFlowResult:
         """Handle a switch discovered via NSDP."""
+        return await self._async_handle_discovery(discovery_info)
+
+    async def async_step_ssdp(
+        self, discovery_info: SsdpServiceInfo
+    ) -> ConfigFlowResult:
+        """Handle a switch discovered via SSDP.
+
+        Some models never speak NSDP (the GS728TPPv3 for one) but announce
+        themselves over UPnP with modelDescription "NETGEAR Switch". The web
+        UI host comes from presentationURL and the MAC is the tail of the
+        device UUID (uuid:...-<12 hex digits of MAC>).
+        """
+        upnp = discovery_info.upnp
+        host = urlparse(
+            upnp.get("presentationURL") or discovery_info.ssdp_location or ""
+        ).hostname
+        mac = upnp.get("UDN", "").rpartition("-")[2]
+        if not host or len(mac) != 12:
+            return self.async_abort(reason="cannot_connect")
+        return await self._async_handle_discovery(
+            {
+                CONF_HOST: host,
+                "mac": mac,
+                "model": upnp.get("modelName", ""),
+                "name": upnp.get("friendlyName", ""),
+            }
+        )
+
+    async def _async_handle_discovery(
+        self, discovery_info: dict[str, Any]
+    ) -> ConfigFlowResult:
+        """Dedupe a discovered switch and ask for its password."""
         host = discovery_info[CONF_HOST]
         await self.async_set_unique_id(format_mac(discovery_info["mac"]))
         self._abort_if_unique_id_configured(updates={CONF_HOST: host})

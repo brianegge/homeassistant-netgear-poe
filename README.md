@@ -128,6 +128,11 @@ directly attached subnets are scanned, and switches answer
 probabilistically — a newly powered switch may take up to a minute to
 appear.
 
+Some models never answer NSDP at all — the GS728TPPv3 for one — but
+announce themselves over **SSDP/UPnP** as `NETGEAR Switch`. Those are
+picked up through Home Assistant's built-in SSDP discovery and offered
+the same way.
+
 Discovery runs automatically once any switch is configured (to surface the
 rest). To discover the **first** switch without adding one manually, add
 this line to `configuration.yaml` and restart:

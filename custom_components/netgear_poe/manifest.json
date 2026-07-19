@@ -10,5 +10,11 @@
   "issue_tracker": "https://github.com/brianegge/homeassistant-netgear-poe/issues",
   "loggers": ["pysnmp"],
   "requirements": ["pysnmp==7.1.22"],
+  "ssdp": [
+    {
+      "manufacturer": "NETGEAR",
+      "modelDescription": "NETGEAR Switch"
+    }
+  ],
   "version": "2.2.0"
 }

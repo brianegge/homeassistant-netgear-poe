@@ -111,6 +111,82 @@ async def test_discovery_flow_dedupes_configured(
     assert result["reason"] == "already_configured"
 
 
+def _ssdp_info(host: str, mac_hex: str) -> "SsdpServiceInfo":
+    """An SsdpServiceInfo shaped like a real GS728TPPv3 announcement."""
+    from homeassistant.helpers.service_info.ssdp import SsdpServiceInfo
+
+    return SsdpServiceInfo(
+        ssdp_usn=f"uuid:fb8e67ba-7dba-11e7-be55-{mac_hex}::"
+        "urn:schemas-upnp-org:device:InternetGatewayDevice:1",
+        ssdp_st="urn:schemas-upnp-org:device:InternetGatewayDevice:1",
+        ssdp_location=f"http://{host}:44291/rootDesc.xml",
+        upnp={
+            "UDN": f"uuid:fb8e67ba-7dba-11e7-be55-{mac_hex}",
+            "friendlyName": "GS728TPPv3-BBE5C2",
+            "manufacturer": "NETGEAR",
+            "modelDescription": "NETGEAR Switch",
+            "modelName": "GS728TPPv3",
+            "presentationURL": f"http://{host}/",
+        },
+    )
+
+
+async def test_ssdp_flow_creates_entry(
+    hass: HomeAssistant, mock_api: MagicMock
+) -> None:
+    """An SSDP-announced switch (no NSDP, like the GS728TPPv3) can be set up."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": config_entries.SOURCE_SSDP},
+        data=_ssdp_info("192.168.254.250", "289401bbe5c2"),
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "discovery_confirm"
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], user_input={"password": "test-password"}
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"]["host"] == "192.168.254.250"
+
+    entry = hass.config_entries.async_entries(DOMAIN)[0]
+    assert entry.unique_id == "28:94:01:bb:e5:c2"
+
+
+async def test_ssdp_flow_dedupes_configured(hass: HomeAssistant) -> None:
+    """An SSDP announcement for a configured switch aborts (and updates host)."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={"host": "192.168.254.9", "password": "x", "community": ""},
+        unique_id="28:94:01:bb:e5:c2",
+    )
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": config_entries.SOURCE_SSDP},
+        data=_ssdp_info("192.168.254.250", "289401bbe5c2"),
+    )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
+    # The moved switch's new address is picked up.
+    assert entry.data["host"] == "192.168.254.250"
+
+
+async def test_ssdp_flow_rejects_malformed(hass: HomeAssistant) -> None:
+    """An announcement without a usable MAC aborts instead of crashing."""
+    info = _ssdp_info("192.168.254.250", "289401bbe5c2")
+    info.upnp["UDN"] = "uuid:not-a-mac"
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": config_entries.SOURCE_SSDP},
+        data=info,
+    )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "cannot_connect"
+
+
 async def test_scan_addrs_cover_all_interfaces(hass: HomeAssistant) -> None:
     """Each enabled interface contributes its directed broadcast and its IP.
 

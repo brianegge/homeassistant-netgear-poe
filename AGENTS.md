@@ -110,7 +110,10 @@ JSON generation. Only the probe is authoritative.
   every subnet. Pro-port switches are offered for setup outright; Plus-port
   switches are offered only after `async_probe_supported` confirms their web
   UI is a generation the integration drives (ProSAFE-Plus-only models fail
-  the probe and are skipped).
+  the probe and are skipped). Models that never answer NSDP (GS728TPPv3)
+  announce over SSDP/UPnP with modelDescription "NETGEAR Switch" and are
+  matched via the manifest `ssdp` key; the MAC is the tail of the UPnP UDN
+  and the host comes from presentationURL.
 
 ## Conventions
 
