@@ -21,6 +21,24 @@ OID_IF_ALIAS = "1.3.6.1.2.1.31.1.1.1.18"
 MAX_PHYSICAL_PORT = 64
 
 
+def _build_engine() -> Any:
+    """Build the SNMP engine with its MIB modules already compiled.
+
+    pysnmp compiles its MIB modules lazily by reading them off disk — blocking
+    filesystem I/O that Home Assistant flags when it runs on the event loop.
+    Constructing the engine and forcing `load_modules()` here means this
+    executor-thread call absorbs the bulk of that work, off-loop. (pysnmp still
+    does a small one-time source scan inside its first command that can't be
+    pre-warmed without issuing a full SNMP request, which is unsafe to do
+    during setup — so a brief first-poll scan may remain.)
+    """
+    from pysnmp.hlapi.v3arch.asyncio import SnmpEngine
+
+    engine = SnmpEngine()
+    engine.get_mib_builder().load_modules()
+    return engine
+
+
 class SnmpLinkMonitor:
     """Read per-port link state and names via SNMP (pysnmp, v2c)."""
 
@@ -63,16 +81,13 @@ class SnmpLinkMonitor:
             ContextData,
             ObjectIdentity,
             ObjectType,
-            SnmpEngine,
             UdpTransportTarget,
             bulk_walk_cmd,
         )
 
         if self._engine is None:
-            # Constructing the engine loads pysnmp's MIB modules, which does
-            # blocking filesystem reads; keep those off the event loop.
             loop = asyncio.get_running_loop()
-            self._engine = await loop.run_in_executor(None, SnmpEngine)
+            self._engine = await loop.run_in_executor(None, _build_engine)
         target = await UdpTransportTarget.create((self.host, 161), timeout=5, retries=1)
         base = tuple(int(x) for x in oid.split("."))
         result: dict[int, Any] = {}
