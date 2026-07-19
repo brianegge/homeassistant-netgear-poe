@@ -22,6 +22,7 @@ import logging
 import secrets
 import time
 from base64 import b64decode, b64encode
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from hashlib import md5
 from typing import Any
@@ -29,11 +30,24 @@ from urllib.parse import quote
 
 import aiohttp
 
+from ._upload import _multipart_upload_body, _ProgressUpload
+
 _LOGGER = logging.getLogger(__name__)
 
 # The two CGI endpoints every command goes through (reads vs. writes).
 _GET_CGI = "get.cgi"
 _SET_CGI = "set.cgi"
+
+# Firmware install. The switch writes flash while the upload POST is in flight
+# and then reports progress only as coarse state strings, so the byte upload
+# drives the progress bar and the flash-write phase is polled without a percent.
+_FIRMWARE_UPLOAD_TIMEOUT = 600
+_DOWNLOAD_STATUS_POLL_SECONDS = 3
+# 600 s / 3 s: a flash write can take several minutes on these switches.
+_DOWNLOAD_STATUS_ATTEMPTS = 200
+# The post-reboot version poll: a reboot is ~a minute, so wait comfortably past.
+_REBOOT_POLL_SECONDS = 5
+_REBOOT_POLL_ATTEMPTS = 60
 
 
 def _insecure_connector() -> aiohttp.TCPConnector:
@@ -156,8 +170,9 @@ class DualImageStatus:
 class NetgearPoeApi:
     """Async client for PoE control over the switch's web API."""
 
-    # No firmware-install path is implemented for this backend (yet).
-    supports_firmware_install = False
+    # Flash firmware via the file_http_download / file_dualConf / sys_reboot
+    # CGI commands (see async_install_firmware). Inherited by NetgearJsonV2Api.
+    supports_firmware_install = True
 
     def __init__(
         self,
@@ -520,6 +535,204 @@ class NetgearPoeApi:
             ).lstrip("."),
         )
 
+    async def async_get_image_status(self) -> DualImageStatus:
+        """Read the two flash slots and which one is active / boots next."""
+        result = await self._authed_request(_GET_CGI, "file_dualStatus")
+        return _parse_dual_status(result)
+
+    async def _async_upload_firmware(
+        self,
+        image: bytes,
+        filename: str,
+        progress: Callable[[int], None] | None = None,
+    ) -> None:
+        """Upload a firmware image, then poll until the switch has stored it.
+
+        Posted directly rather than through _request: the body is multipart and
+        the switch writes flash while reading it, so it needs its own generous
+        timeout. imgName is the constant "1" — the switch chooses the inactive
+        slot itself (see async_install_firmware, which verifies where it landed
+        before doing anything irreversible). The byte upload drives the bar
+        (20..60); the flash-write phase reports only state strings, so it is
+        polled without moving the bar further.
+        """
+        # Field order mirrors the switch's own upload form. The None marks the
+        # file part. xsrf here is the literal string the form carries; the real
+        # token is the X-CSRF-XSID header, added below.
+        fields: list[tuple[str, str | None]] = [
+            ("fileType", "0"),
+            ("xsrf", "undefined"),
+            ("imgName", "1"),
+            ("fileName", None),
+        ]
+        body, content_type = _multipart_upload_body(fields, filename, image)
+        payload = _ProgressUpload(body, content_type, progress, 20, 40)
+
+        headers = {
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": f"{self._scheme}://{self.host}/",
+        }
+        if self._xsid_header:
+            headers["X-CSRF-XSID"] = self._xsid_header
+        try:
+            async with self._get_session().post(
+                self._url(_SET_CGI, "file_http_download"),
+                data=payload,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=_FIRMWARE_UPLOAD_TIMEOUT),
+            ) as resp:
+                resp.raise_for_status()
+                await resp.read()
+        except (aiohttp.ClientError, TimeoutError) as err:
+            raise NetgearError(f"Firmware upload failed: {err}") from err
+
+        await self._async_wait_for_upload()
+
+    async def _async_wait_for_upload(self) -> None:
+        """Poll file_http_downloadStatus until the flash write finishes.
+
+        The status is a state string with no percent: "uploading" while the
+        switch writes flash, then "success". Anything mentioning a failure ends
+        the wait immediately rather than sitting out the whole timeout.
+        """
+        for _ in range(_DOWNLOAD_STATUS_ATTEMPTS):
+            result = await self._request(_GET_CGI, "file_http_downloadStatus")
+            status = str(result.get("data", {}).get("status", "")).lower()
+            if status == "success":
+                return
+            if any(word in status for word in ("fail", "error", "abort")):
+                raise NetgearError(f"Firmware write failed: {status}")
+            await asyncio.sleep(_DOWNLOAD_STATUS_POLL_SECONDS)
+        raise NetgearError("Firmware write did not complete in time")
+
+    async def _async_activate_image(self, version: str) -> None:
+        """Mark the freshly uploaded image as the one to boot next.
+
+        imgName is the same constant "1" the upload used; imgDescriptor +
+        imgActive select and activate the slot. The response shape varies, so
+        the real check is the caller re-reading file_dualStatus and confirming
+        next_active moved — an activation that silently did nothing fails there.
+        """
+        await self._authed_request(
+            _SET_CGI,
+            "file_dualConf",
+            self._form_body(
+                {
+                    "imgName": 1,
+                    "imgDescriptor": version,
+                    "imgActive": "on",
+                    "xsrf": "undefined",
+                }
+            ),
+        )
+
+    async def _async_reboot(self) -> None:
+        """Reboot the switch. Losing the connection here IS the reboot."""
+        try:
+            await self._request(
+                _SET_CGI,
+                "sys_reboot",
+                self._form_body({"reboot": "on", "xsrf": "undefined"}),
+            )
+        except NetgearError:
+            # The switch drops the connection as it goes down; that is success,
+            # not failure. A reboot that didn't take is caught by the version
+            # poll below timing out.
+            _LOGGER.debug("Reboot request connection dropped (expected)", exc_info=True)
+        self._xsid_header = None
+
+    async def _async_wait_for_firmware(
+        self, version: str, progress: Callable[[int], None] | None = None
+    ) -> None:
+        """Poll until the rebooted switch reports `version`.
+
+        Early polls can still reach the old firmware (the switch answers for a
+        few seconds before going down) or fail while it is booting, so a
+        mismatch keeps waiting; only the deadline gives up. Progress walks
+        80 -> 95 as the retry budget is spent — each poll is a real step.
+        """
+        observed = ""
+        for attempt in range(1, _REBOOT_POLL_ATTEMPTS + 1):
+            await asyncio.sleep(_REBOOT_POLL_SECONDS)
+            if progress is not None:
+                progress(80 + (attempt * 15) // _REBOOT_POLL_ATTEMPTS)
+            try:
+                observed = (await self.async_get_info()).firmware
+            except NetgearError:
+                continue
+            if observed == version:
+                return
+        raise NetgearError(
+            f"Switch did not come back on firmware {version} within "
+            f"{_REBOOT_POLL_ATTEMPTS * _REBOOT_POLL_SECONDS} s"
+            + (f" (last reported {observed})" if observed else "")
+        )
+
+    async def async_install_firmware(
+        self,
+        image: bytes,
+        version: str,
+        filename: str,
+        progress: Callable[[int], None] | None = None,
+    ) -> None:
+        """Install a firmware image: upload, verify slot, activate, reboot.
+
+        The switch writes the upload to the INACTIVE slot itself (imgName is a
+        constant "1"), so the running firmware stays flashed as a rollback. The
+        final reboot drops PoE — and the switch's own link — for around a
+        minute. `version` must match what the image reports after flashing.
+
+        FAIL-CLOSED: this backend's slot targeting was reverse-engineered from a
+        packet capture and is NOT verified against a live flash. Before doing
+        anything irreversible, the flow re-reads file_dualStatus and confirms
+        the new version actually landed in the slot we expected; if it did not
+        (a wrong-slot assumption, or the running image was overwritten), it
+        raises instead of activating and rebooting.
+        """
+
+        def report(percent: int) -> None:
+            if progress is not None:
+                progress(percent)
+
+        before = await self.async_get_image_status()
+        target = before.inactive
+        _LOGGER.info(
+            "Uploading firmware %s to %s slot %s (running %s from %s)",
+            version,
+            self.host,
+            target,
+            before.versions.get(before.current_active, "?"),
+            before.current_active,
+        )
+        report(20)
+        await self._async_upload_firmware(image, filename, progress)
+
+        staged = await self.async_get_image_status()
+        if staged.versions.get(target) != version:
+            raise NetgearError(
+                f"Upload finished but slot {target} reports "
+                f"{staged.versions.get(target) or 'nothing'}, expected {version}; "
+                "refusing to activate or reboot"
+            )
+        report(60)
+
+        await self._async_activate_image(version)
+        if (await self.async_get_image_status()).next_active != target:
+            raise NetgearError(f"Could not make {target} the boot image")
+        report(70)
+
+        _LOGGER.info(
+            "Rebooting %s into %s (%s); PoE will drop briefly",
+            self.host,
+            target,
+            version,
+        )
+        await self._async_reboot()
+        report(80)
+        await self._async_wait_for_firmware(version, progress)
+        report(100)
+        _LOGGER.info("%s is now running firmware %s", self.host, version)
+
     async def async_logout(self) -> None:
         """Log out to free the switch's limited session slots."""
         if self._xsid_header is None:
@@ -540,6 +753,50 @@ class NetgearPoeApi:
         if self._owns_session and self._session is not None:
             await self._session.close()
             self._session = None
+
+
+def _resolve_slot(marker: Any, versions: dict[str, str]) -> str:
+    """Map a file_dualStatus active/next marker to an "image1"/"image2" key.
+
+    The marker has been seen as a slot number ("1"/"2") and as slot names;
+    tolerate both, and — since the exact form is not verified across firmware —
+    also resolve a version-string marker by matching it against slot contents.
+    """
+    text = str(marker).strip()
+    low = text.lower()
+    if low in ("1", "image1", "img1"):
+        return "image1"
+    if low in ("2", "image2", "img2"):
+        return "image2"
+    for slot, ver in versions.items():
+        if ver and ver == text:
+            return slot
+    return low
+
+
+def _parse_dual_status(result: dict[str, Any]) -> DualImageStatus:
+    """Parse a file_dualStatus response into a DualImageStatus.
+
+    Shape: {"data":{"status":[{img1Ver,img2Ver,curAct,nextAct}]}} (a one-row
+    list); tolerate the row being given directly as the dict too.
+    """
+    data = result.get("data", result)
+    rows = data.get("status") if isinstance(data, dict) else None
+    if isinstance(rows, list):
+        row = rows[0] if rows else {}
+    elif isinstance(rows, dict):
+        row = rows
+    else:
+        row = data if isinstance(data, dict) else {}
+    versions = {
+        "image1": str(row.get("img1Ver", "")),
+        "image2": str(row.get("img2Ver", "")),
+    }
+    return DualImageStatus(
+        versions=versions,
+        current_active=_resolve_slot(row.get("curAct"), versions),
+        next_active=_resolve_slot(row.get("nextAct"), versions),
+    )
 
 
 def _is_auth_failure(result: dict[str, Any]) -> bool:
