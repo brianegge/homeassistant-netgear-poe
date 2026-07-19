@@ -116,7 +116,7 @@ async def test_upload_posts_to_httpupload_cgi_then_polls() -> None:
     # The flash-write poll comes back done immediately.
     api._authed_request = AsyncMock(return_value={"data": {"status": "success"}})
 
-    await api._async_upload_firmware(b"bix-bytes", "image2", "fw.bix")
+    await api._async_upload_firmware(b"bix-bytes", "fw.bix")
 
     url = session.post.call_args.args[0]
     assert url.endswith("/cgi-bin/httpupload.cgi")
@@ -125,29 +125,19 @@ async def test_upload_posts_to_httpupload_cgi_then_polls() -> None:
     assert headers["X-CSRF-XSID"] == "XSIDTOKEN"
     assert headers["X-Requested-With"] == "XMLHttpRequest"
 
-    fields = parse_upload_payload(session.post.call_args.kwargs["data"])
+    fields = parse_upload_payload(
+        session.post.call_args.kwargs["data"], headers["Content-Type"]
+    )
     names = [name for name, _ in fields]
     assert names == ["fileType", "xsrf", "imgName", "fileName"]
     values = dict(fields)
     assert values["fileType"] == "0"
     assert values["xsrf"] == "undefined"
-    assert values["imgName"] == "2"  # the inactive slot number, not a constant
+    # imgName is the constant "1" (a standby indicator); "2" is rejected.
+    assert values["imgName"] == "1"
     assert values["fileName"] == b"bix-bytes"
     # The status poll ran.
     api._authed_request.assert_awaited_with("get.cgi", "file_http_downloadStatus")
-
-
-async def test_upload_targets_the_named_slot() -> None:
-    """imgName follows the target slot so the running image is never overwritten."""
-    session = _upload_session()
-    api = NetgearPoeApi("host", "pw", session=session)
-    api._xsid_header = "X"
-    api._authed_request = AsyncMock(return_value={"data": {"status": "success"}})
-
-    await api._async_upload_firmware(b"img", "image1", "fw.bix")
-    assert dict(parse_upload_payload(session.post.call_args.kwargs["data"]))[
-        "imgName"
-    ] == "1"
 
 
 async def test_wait_for_upload_succeeds_after_uploading() -> None:
@@ -295,7 +285,7 @@ async def test_install_uploads_verifies_activates_reboots() -> None:
     )
 
     api._async_upload_firmware.assert_awaited_once_with(
-        b"bix", "image2", "fw.bix", progress.append
+        b"bix", "fw.bix", progress.append
     )
     api._async_activate_image.assert_awaited_once_with("1.0.5.12")
     api._async_reboot.assert_awaited_once()

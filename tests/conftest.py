@@ -34,6 +34,14 @@ MOCK_CONFIG = {
     "host": MOCK_HOST,
     "password": MOCK_PASSWORD,
     "community": MOCK_COMMUNITY,
+    "trap_mode": "local",
+    "trap_bridge_host": "",
+}
+# Entry shape from before trap_mode existed; setup must still honor it.
+MOCK_CONFIG_LEGACY = {
+    "host": MOCK_HOST,
+    "password": MOCK_PASSWORD,
+    "community": MOCK_COMMUNITY,
     "enable_traps": True,
 }
 MOCK_SYS_NAME = "boiler-switch"
@@ -166,16 +174,21 @@ async def setup_integration(hass: HomeAssistant, entry: MockConfigEntry) -> None
     await hass.async_block_till_done()
 
 
-def parse_upload_payload(payload: object) -> list[tuple[str, object]]:
-    """Parse a _ProgressUpload multipart body into ordered (name, value) pairs.
+def parse_upload_payload(
+    payload: object, content_type: str | None = None
+) -> list[tuple[str, object]]:
+    """Parse a multipart upload body into ordered (name, value) pairs.
 
-    Text values come back as str, the file part as bytes. Lets the upload
-    tests assert on the real streamed body now that it is built by hand
-    (a plain bytes payload) rather than an aiohttp FormData.
+    Text values come back as str, the file part as bytes. Accepts either a
+    _ProgressUpload (streamed backends) or a raw bytes body with its
+    content_type passed alongside (the JSON CGI backend posts single-shot).
     """
-    content_type = payload.content_type  # type: ignore[attr-defined]
+    if content_type is None:
+        content_type = payload.content_type  # type: ignore[attr-defined]
+        body = payload._value  # type: ignore[attr-defined]
+    else:
+        body = payload  # type: ignore[assignment]
     boundary = content_type.split("boundary=")[1].encode()
-    body = payload._value  # type: ignore[attr-defined]
     fields: list[tuple[str, object]] = []
     for raw in body.split(b"--" + boundary):
         if b"Content-Disposition" not in raw:

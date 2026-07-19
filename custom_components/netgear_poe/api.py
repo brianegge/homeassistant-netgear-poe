@@ -30,7 +30,7 @@ from urllib.parse import quote
 
 import aiohttp
 
-from ._upload import _multipart_upload_body, _ProgressUpload
+from ._upload import _multipart_upload_body
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -549,7 +549,6 @@ class NetgearPoeApi:
     async def _async_upload_firmware(
         self,
         image: bytes,
-        target: str,
         filename: str,
         progress: Callable[[int], None] | None = None,
     ) -> None:
@@ -557,36 +556,38 @@ class NetgearPoeApi:
 
         Posted directly rather than through _request: the body is multipart and
         the switch writes flash while reading it, so it needs its own generous
-        timeout. imgName names the target (inactive) slot — "1" or "2", not a
-        constant — so the running firmware is never the one overwritten;
-        async_install_firmware then verifies where the image landed before
-        doing anything irreversible. xsrf is the literal string the form
-        carries (the real token is the X-CSRF-XSID header). The byte upload
-        drives the bar (20..60); the flash-write phase reports only state
-        strings, so it is polled without moving the bar further.
+        timeout. imgName is the constant "1" — a "standby image" indicator, not
+        a slot number; the switch writes the inactive slot itself (imgName="2"
+        is rejected as an invalid image). async_install_firmware then verifies
+        where the image actually landed before doing anything irreversible.
+        xsrf is the literal string the form carries (the real token is the
+        X-CSRF-XSID header).
+
+        The body is sent in one shot rather than chunk-streamed with progress:
+        this switch resets the connection ("cannot write request body") on a
+        streamed HTTPS upload, so the bar holds at its pre-upload value until
+        the upload returns. `progress` is accepted for interface parity.
         """
-        slot = "2" if target == "image2" else "1"
         fields: list[tuple[str, str | None]] = [
             ("fileType", "0"),
             ("xsrf", "undefined"),
-            ("imgName", slot),
+            ("imgName", "1"),
             ("fileName", None),
         ]
         url = f"{self._scheme}://{self.host}{_UPLOAD_PATH}"
 
         body, content_type = _multipart_upload_body(fields, filename, image)
-        payload = _ProgressUpload(body, content_type, progress, 20, 40)
-
         headers = {
             "X-Requested-With": "XMLHttpRequest",
             "Referer": f"{self._scheme}://{self.host}/",
+            "Content-Type": content_type,
         }
         if self._xsid_header:
             headers["X-CSRF-XSID"] = self._xsid_header
         try:
             async with self._get_session().post(
                 url,
-                data=payload,
+                data=body,
                 headers=headers,
                 timeout=aiohttp.ClientTimeout(total=_FIRMWARE_UPLOAD_TIMEOUT),
             ) as resp:
@@ -735,7 +736,7 @@ class NetgearPoeApi:
             before.current_active,
         )
         report(20)
-        await self._async_upload_firmware(image, target, filename, progress)
+        await self._async_upload_firmware(image, filename, progress)
         await self._async_verify_staged(target, version)
         report(60)
 
