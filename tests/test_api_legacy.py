@@ -402,6 +402,24 @@ async def test_detect_api_https_legacy_prefix() -> None:
     assert api._prefix == "csb555f027"
 
 
+async def test_detect_api_http_redirect_to_prefixed_https() -> None:
+    """An HTTP redirect straight to https://h/csb.../ is flagged HTTPS.
+
+    The prefix in the Location classifies it as legacy here (no HTTPS re-probe),
+    but the redirect still means the switch wants HTTPS, so use_https must be
+    True or later requests would wrongly go out over plain HTTP.
+    """
+    session = _mock_multi_session(
+        [
+            ("https://h/csb555f027/index.htm", ""),  # HTTP -> prefixed HTTPS
+        ]
+    )
+    api = await async_detect_api("h", "pw", session=session)
+    assert isinstance(api, NetgearLegacyApi)
+    assert api.use_https is True
+    assert api._prefix == "csb555f027"
+
+
 async def test_detect_api_https_url_uses_scheme() -> None:
     """The detected HTTPS flag makes the client build https:// URLs."""
     session = _mock_multi_session(

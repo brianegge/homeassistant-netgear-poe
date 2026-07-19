@@ -326,13 +326,15 @@ async def test_login_old_firmware_get_status() -> None:
 
 
 async def test_login_falls_back_to_hash_param() -> None:
-    """When bj4 is rejected, the driver retries and caches the hash spelling."""
+    """A 400 on bj4 makes the driver retry and cache the hash spelling."""
     api = NetgearPoeApi("host", "pw")
 
     async def fake_request(cgi: str, cmd: str, body: str | None = None) -> dict:
         if cmd == "home_loginAuth":
             if api._hash_param == "bj4":
-                raise NetgearError("400")
+                err = NetgearError("400")
+                err.status = 400
+                raise err
             return {"status": "ok", "msgType": "save_success"}
         if cmd == "home_loginStatus":
             return {"data": {"status": "ok", "sess": _SESS}}
@@ -343,6 +345,30 @@ async def test_login_falls_back_to_hash_param() -> None:
 
     assert api._hash_param == "hash"
     assert api._xsid_header is not None
+
+
+async def test_login_does_not_flip_param_on_non_400() -> None:
+    """A transient (non-400) failure must not change the request parameter.
+
+    Flipping to "hash" on a timeout would leave a modern "bj4" switch stuck on
+    the spelling it rejects, so the error is re-raised and bj4 is preserved.
+    """
+    api = NetgearPoeApi("host", "pw")
+    attempts = 0
+
+    async def fake_request(cgi: str, cmd: str, body: str | None = None) -> dict:
+        nonlocal attempts
+        if cmd == "home_loginAuth":
+            attempts += 1
+            raise NetgearError("Request home_loginAuth failed: timeout")
+        raise AssertionError(cmd)
+
+    api._request = AsyncMock(side_effect=fake_request)
+    with pytest.raises(NetgearError):
+        await api.async_login()
+
+    assert api._hash_param == "bj4"
+    assert attempts == 1  # no alternate-spelling retry
 
 
 async def test_login_wrong_password_reports_fail() -> None:

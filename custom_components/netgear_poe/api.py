@@ -43,7 +43,14 @@ def _insecure_connector() -> aiohttp.TCPConnector:
 
 
 class NetgearError(Exception):
-    """Request to the switch failed."""
+    """Request to the switch failed.
+
+    `status` carries the HTTP status when the failure came from a response
+    (None for timeouts, connection resets and non-HTTP errors), so callers can
+    react to a specific code without re-parsing the message.
+    """
+
+    status: int | None = None
 
 
 class NetgearAuthError(NetgearError):
@@ -213,7 +220,10 @@ class NetgearPoeApi:
             # e.g. an HTML login page from firmware this driver doesn't speak
             raise NetgearError(f"Non-JSON response to {cmd}: {err}") from err
         except (aiohttp.ClientError, TimeoutError) as err:
-            raise NetgearError(f"Request {cmd} failed: {err}") from err
+            error = NetgearError(f"Request {cmd} failed: {err}")
+            if isinstance(err, aiohttp.ClientResponseError):
+                error.status = err.status
+            raise error from err
 
     async def async_login(self) -> None:
         """Authenticate and store the CSRF session header.
@@ -255,15 +265,19 @@ class NetgearPoeApi:
         """Post the password, tolerating the two request-parameter spellings.
 
         Newer firmware rejects the legacy "hash" query parameter (400); older
-        firmware accepts either. Try the modern "bj4" first, and on the one
-        switch generation that wants "hash", flip once and cache the result so
-        every later request uses the spelling that works.
+        firmware accepts either. Try the modern "bj4" first, and only when the
+        switch rejects it with a 400 flip to "hash" and cache the result so
+        every later request uses the spelling that works. Any other failure
+        (timeout, reset, server error) is re-raised unchanged — flipping the
+        parameter on those would leave a "bj4" switch stuck on "hash".
         """
         body = form_body({"pwd": encode_password(self._password)})
         try:
             return await self._request("set.cgi", "home_loginAuth", body)
-        except NetgearError:
-            self._hash_param = "hash" if self._hash_param == "bj4" else "bj4"
+        except NetgearError as err:
+            if err.status != 400 or self._hash_param != "bj4":
+                raise
+            self._hash_param = "hash"
             return await self._request("set.cgi", "home_loginAuth", body)
 
     async def _authed_request(

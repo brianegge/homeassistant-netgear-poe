@@ -686,17 +686,20 @@ async def _probe_root(
                 f"{scheme}://{host}/", allow_redirects=False, ssl=False
             ) as resp:
                 location = resp.headers.get("Location", "")
+                redirects_to_https = location.lower().startswith("https://")
                 # A switch forcing HTTPS answers HTTP with a redirect to it;
-                # fall through and re-probe over HTTPS to classify it.
+                # re-probe over HTTPS to classify it — unless the redirect
+                # already carries the legacy prefix, which classifies it here
+                # (falling through so we don't miss that it wants HTTPS).
                 if (
                     scheme == "http"
-                    and location.lower().startswith("https://")
+                    and redirects_to_https
                     and _PREFIX_RE.search(location) is None
                 ):
                     continue
                 match = _PREFIX_RE.search(location)
                 body = "" if match else await resp.text(errors="replace")
-                return scheme == "https", match, body
+                return scheme == "https" or redirects_to_https, match, body
         except (aiohttp.ClientError, TimeoutError) as err:
             error = err  # HTTP may be closed on an HTTPS-only switch; try HTTPS
     raise NetgearError(f"Cannot connect to {host}: {error}")
