@@ -85,3 +85,58 @@ async def test_setup_retries_when_unreachable(
     assert not await hass.config_entries.async_setup(mock_config_entry.entry_id)
     await hass.async_block_till_done()
     assert mock_config_entry.state is ConfigEntryState.SETUP_RETRY
+
+
+async def test_poe_stall_keeps_switch_available_and_flags_after_threshold(
+    hass: HomeAssistant,
+    mock_api: MagicMock,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """A hung PoE read on a reachable switch flags a stall, not an outage.
+
+    While management reads (async_get_info) still answer, the device stays
+    available with its last-known PoE data and the problem flag turns on only
+    after POE_STALL_THRESHOLD consecutive failures — then clears on recovery.
+    """
+    await setup_integration(hass, mock_config_entry)
+    coordinator = mock_config_entry.runtime_data.coordinator
+    assert coordinator.poe_stalled is False
+
+    # The PoE telemetry query now hangs, but the switch still answers info.
+    mock_api.async_get_data.side_effect = NetgearError("timeout")
+
+    await coordinator.async_refresh()
+    assert coordinator.last_update_success is True  # still available
+    assert coordinator.poe_stalled is False  # one miss is below the threshold
+
+    await coordinator.async_refresh()
+    assert coordinator.last_update_success is True
+    assert coordinator.poe_stalled is True  # second miss trips it
+    # Last-known PoE data is retained (power keeps flowing while telemetry hangs).
+    assert coordinator.data.ports[1].power_watts == 6.5
+
+    # Recovery clears the flag.
+    mock_api.async_get_data.side_effect = None
+    await coordinator.async_refresh()
+    assert coordinator.poe_stalled is False
+
+
+async def test_poe_read_failure_when_unreachable_marks_unavailable(
+    hass: HomeAssistant,
+    mock_api: MagicMock,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """When neither PoE nor management reads answer, the switch is down.
+
+    That is a real outage — the coordinator fails (entities unavailable) and
+    must not masquerade as a PoE-controller stall.
+    """
+    await setup_integration(hass, mock_config_entry)
+    coordinator = mock_config_entry.runtime_data.coordinator
+
+    mock_api.async_get_data.side_effect = NetgearError("timeout")
+    mock_api.async_get_info.side_effect = NetgearError("timeout")
+
+    await coordinator.async_refresh()
+    assert coordinator.last_update_success is False
+    assert coordinator.poe_stalled is False

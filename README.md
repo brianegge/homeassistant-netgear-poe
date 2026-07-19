@@ -65,6 +65,14 @@ trap receiver on UDP 162 and registers this host as a trap destination on
 the switch, so `linkUp`/`linkDown` events update the link sensors
 instantly (the poll remains a backstop for dropped UDP traps).
 
+There is also a **PoE controller stalled** problem binary sensor. It turns
+on when the switch keeps answering management reads but its PoE-status query
+hangs for two consecutive polls — a wedged PoE controller (seen after a
+firmware update on the xui switches) that a cold power-cycle clears. Power
+delivery keeps working while this is on, so it means "a cold reboot is
+needed", not "PoE is down"; point a notification automation at it to be told
+when a switch needs power-cycling.
+
 Plus one **PoE power** sensor with the switch's total PoE draw in watts,
 and a **Firmware** update entity. The latest known firmware per model is
 bundled with the integration (version, download link and release notes).

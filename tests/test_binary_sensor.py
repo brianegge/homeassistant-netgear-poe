@@ -7,12 +7,14 @@ from unittest.mock import MagicMock
 from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.netgear_poe.api import NetgearError
 from custom_components.netgear_poe.const import DOMAIN
 
 from .conftest import MOCK_HOST, MOCK_PASSWORD, setup_integration
 
 PORT_1_LINK = "binary_sensor.boiler_switch_port_1_driveway_cam_link"
 PORT_2_LINK = "binary_sensor.boiler_switch_port_2_link"
+STALLED = "binary_sensor.boiler_switch_poe_controller_stalled"
 
 
 async def test_link_sensors(
@@ -80,3 +82,35 @@ async def test_no_link_sensors_without_community(
     )
     await setup_integration(hass, entry)
     assert hass.states.get(PORT_1_LINK) is None
+    # The stall problem sensor is not SNMP-gated; it exists regardless.
+    assert hass.states.get(STALLED) is not None
+
+
+async def test_poe_controller_stalled_sensor(
+    hass: HomeAssistant,
+    mock_api: MagicMock,
+    mock_link_monitor: MagicMock,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """The problem sensor turns on once the PoE telemetry stall trips."""
+    await setup_integration(hass, mock_config_entry)
+
+    state = hass.states.get(STALLED)
+    assert state is not None
+    assert state.state == "off"
+
+    # PoE read hangs while the switch stays reachable (async_get_info still OK).
+    mock_api.async_get_data.side_effect = NetgearError("timeout")
+    coordinator = mock_config_entry.runtime_data.coordinator
+    await coordinator.async_refresh()
+    await coordinator.async_refresh()  # second miss trips the threshold
+    await hass.async_block_till_done()
+
+    state = hass.states.get(STALLED)
+    assert state.state == "on"
+
+    # Recovery clears it.
+    mock_api.async_get_data.side_effect = None
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    assert hass.states.get(STALLED).state == "off"

@@ -136,6 +136,14 @@ JSON generation. Only the probe is authoritative.
 - All blocking work is async; `pysnmp` is imported lazily inside methods.
 - SNMP and traps are best-effort — failures degrade features, never break
   PoE control.
+- The coordinator distinguishes a wedged PoE controller from a dead switch:
+  if `async_get_data` fails but `async_get_info` still answers, it keeps the
+  device available with last-known PoE data and, after
+  `POE_STALL_THRESHOLD` consecutive misses, sets `coordinator.poe_stalled`
+  (surfaced by the "PoE controller stalled" `problem` binary sensor). This
+  is the xui firmware's post-update failure mode where PoE power keeps
+  flowing but the `{PoEPSEInterfaceList}` telemetry query hangs; a cold
+  power-cycle clears it.
 
 ## Testing
 

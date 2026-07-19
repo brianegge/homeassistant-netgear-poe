@@ -14,6 +14,12 @@ SERVICE_SET_PORT_NAME: Final = "set_port_name"
 
 SCAN_INTERVAL_SECONDS: Final = 30
 
+# Consecutive PoE-read failures (while the switch is otherwise reachable) before
+# the "PoE controller stalled" problem sensor turns on. A wedged PoE controller
+# is a firmware fault a cold power-cycle clears; requiring two polls avoids
+# flagging a single transient timeout.
+POE_STALL_THRESHOLD: Final = 2
+
 # NSDP discovery: switches answer probabilistically, so each scan runs a while.
 DISCOVERY_SCAN_SECONDS: Final = 45
 DISCOVERY_INTERVAL_SECONDS: Final = 600
@@ -109,8 +115,7 @@ LATEST_FIRMWARE: Final[dict[str, FirmwareRelease]] = {
             "GS308T_GS310TP_V1.0.5.12.zip"
         ),
         notes_url=(
-            "https://kb.netgear.com/000065851/"
-            "GS308T-GS310TP-Firmware-Version-1-0-5-12"
+            "https://kb.netgear.com/000065851/GS308T-GS310TP-Firmware-Version-1-0-5-12"
         ),
     ),
     # GS308T / GS310TP (S350 hardware answering the JSON CGI API, which has no
@@ -122,8 +127,7 @@ LATEST_FIRMWARE: Final[dict[str, FirmwareRelease]] = {
             "GS308T_GS310TP_V1.0.5.12.zip"
         ),
         notes_url=(
-            "https://kb.netgear.com/000065851/"
-            "GS308T-GS310TP-Firmware-Version-1-0-5-12"
+            "https://kb.netgear.com/000065851/GS308T-GS310TP-Firmware-Version-1-0-5-12"
         ),
     ),
     # GS324T / GS324TP (S350). Netgear ships one image for both, from the
