@@ -86,9 +86,22 @@
     },
     "set_port_name_failed": {
       "message": "Failed to set the name of port {port} of {host}: {error}"
+    },
+    "reboot_failed": {
+      "message": "Failed to reboot switch at {host}: {error}"
     }
   },
   "entity": {
+    "binary_sensor": {
+      "poe_controller_stalled": {
+        "name": "PoE controller stalled"
+      }
+    },
+    "button": {
+      "reboot": {
+        "name": "Reboot"
+      }
+    },
     "sensor": {
       "poe_power": {
         "name": "PoE power"

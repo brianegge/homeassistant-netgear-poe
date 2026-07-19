@@ -672,6 +672,20 @@ class NetgearBaseUiApi:
             reason = _input_value(html, "err_msg") or _UNKNOWN_ERROR
             raise NetgearError(f"Could not activate {slot}: {reason}")
 
+    async def async_reboot(self) -> None:
+        """Reboot the switch (drops PoE and the switch's uplink for ~a minute).
+
+        A cold reboot from the web UI, the recovery for a wedged PoE
+        controller or a hung SNMP agent. Establishes a session first so the
+        reboot form post is authenticated, then issues it. Inherited by the
+        cheetah subclass, whose own _async_reboot override runs instead.
+        """
+        if not self._logged_in:
+            async with self._login_lock:
+                if not self._logged_in:
+                    await self.async_login()
+        await self._async_reboot()
+
     async def _async_reboot(self) -> None:
         """Reboot the switch via the Device Reboot form.
 

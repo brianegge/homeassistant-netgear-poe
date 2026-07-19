@@ -31,6 +31,7 @@ from .const import (
     DISCOVERY_SCAN_SECONDS,
     DOMAIN,
     PLATFORMS,
+    POE_STALL_THRESHOLD,
     SCAN_INTERVAL_SECONDS,
     TRAP_MODE_DISABLED,
     TRAP_MODE_LOCAL,
@@ -80,6 +81,12 @@ class NetgearPoeCoordinator(DataUpdateCoordinator[PoeData]):
         )
         self.api = api
         self.link_monitor = link_monitor
+        # Set when the switch answers management reads but its PoE-telemetry
+        # query keeps timing out — a wedged PoE controller that a cold
+        # power-cycle clears (the PoE power itself keeps flowing). Surfaced by
+        # the "PoE controller stalled" problem binary sensor.
+        self.poe_stalled = False
+        self._poe_stall_count = 0
 
     async def _async_update_data(self) -> PoeData:
         try:
@@ -87,11 +94,62 @@ class NetgearPoeCoordinator(DataUpdateCoordinator[PoeData]):
         except NetgearAuthError as err:
             raise ConfigEntryAuthFailed(str(err)) from err
         except NetgearError as err:
+            # Tell a wedged PoE controller apart from an unreachable switch: if
+            # the management plane still answers a cheap identity read, the PoE
+            # telemetry query is hanging on its own (a firmware fault cleared by
+            # a cold power-cycle). Keep the device available and raise the
+            # problem flag instead of blacking every entity out. A switch that
+            # answers neither read is genuinely down.
+            #
+            # This also covers a switch already wedged at startup: the first
+            # refresh has no last-known data, so fall back to empty PoE data
+            # rather than failing setup — that keeps the device-level entities
+            # (the Reboot button and this stall sensor) available, which is the
+            # only way to recover the switch from Home Assistant. On a
+            # already-running switch the last-known PoE figures are kept, since
+            # power is still being delivered while only the readout is stuck.
+            if await self._switch_reachable():
+                self._poe_stall_count += 1
+                if self._poe_stall_count == POE_STALL_THRESHOLD:
+                    self.poe_stalled = True
+                    _LOGGER.warning(
+                        "PoE telemetry on %s has stalled for %d polls while the "
+                        "switch stays reachable; a cold power-cycle is likely "
+                        "needed to recover the PoE controller",
+                        self.api.host,
+                        self._poe_stall_count,
+                    )
+                data = self.data if self.data is not None else PoeData()
+                await self._apply_link_info(data)
+                return data
+            self._reset_stall()
             raise UpdateFailed(
                 translation_domain=DOMAIN,
                 translation_key="communication_error",
                 translation_placeholders={"host": self.api.host, "error": str(err)},
             ) from err
+        self._reset_stall()
+        await self._apply_link_info(data)
+        return data
+
+    async def _switch_reachable(self) -> bool:
+        """Whether the switch still answers a cheap management read.
+
+        Used to tell a stalled PoE controller (this returns True) from a switch
+        that has dropped off the network entirely (False).
+        """
+        try:
+            await self.api.async_get_info()
+        except NetgearError:
+            return False
+        return True
+
+    def _reset_stall(self) -> None:
+        self._poe_stall_count = 0
+        self.poe_stalled = False
+
+    async def _apply_link_info(self, data: PoeData) -> None:
+        """Overlay SNMP link state and ifAlias names onto the PoE data."""
         if self.link_monitor is not None:
             data.link, names = await self.link_monitor.async_get_port_info()
             # SNMP ifAlias is the same source LibreNMS uses and needs no web
@@ -99,7 +157,6 @@ class NetgearPoeCoordinator(DataUpdateCoordinator[PoeData]):
             for port, name in names.items():
                 if port in data.ports:
                     data.ports[port].alias = name
-        return data
 
     @callback
     def apply_link_trap(self, port: int, up: bool) -> None:

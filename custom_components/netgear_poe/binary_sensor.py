@@ -11,7 +11,7 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import NetgearPoeConfigEntry, NetgearPoeCoordinator
-from .entity import NetgearPoePortEntity
+from .entity import NetgearPoeEntity, NetgearPoePortEntity
 
 PARALLEL_UPDATES = 1
 
@@ -21,14 +21,43 @@ async def async_setup_entry(
     entry: NetgearPoeConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up port link sensors when SNMP is configured."""
-    if entry.runtime_data.link_monitor is None:
-        return
+    """Set up the PoE-controller problem sensor and, with SNMP, link sensors."""
     coordinator = entry.runtime_data.coordinator
-    async_add_entities(
-        NetgearPortLinkSensor(coordinator, entry, port)
-        for port in sorted(coordinator.data.ports)
-    )
+    entities: list[BinarySensorEntity] = [NetgearPoeStalledSensor(coordinator, entry)]
+    if entry.runtime_data.link_monitor is not None:
+        entities.extend(
+            NetgearPortLinkSensor(coordinator, entry, port)
+            for port in sorted(coordinator.data.ports)
+        )
+    async_add_entities(entities)
+
+
+class NetgearPoeStalledSensor(NetgearPoeEntity, BinarySensorEntity):
+    """Problem sensor: PoE telemetry stalled while the switch stays reachable.
+
+    Turns on when the switch keeps answering management reads but its PoE
+    status query hangs — a wedged PoE controller that a cold power-cycle
+    clears (see the coordinator's stall handling). Power delivery is
+    unaffected, so this flags "a cold reboot is needed", not "PoE is down".
+    """
+
+    _attr_device_class = BinarySensorDeviceClass.PROBLEM
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_translation_key = "poe_controller_stalled"
+
+    def __init__(
+        self,
+        coordinator: NetgearPoeCoordinator,
+        entry: NetgearPoeConfigEntry,
+    ) -> None:
+        """Initialize."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_poe_controller_stalled"
+
+    @property
+    def is_on(self) -> bool:
+        """Return True while the PoE controller telemetry is stalled."""
+        return self.coordinator.poe_stalled
 
 
 class NetgearPortLinkSensor(NetgearPoePortEntity, BinarySensorEntity):

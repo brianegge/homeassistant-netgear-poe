@@ -133,6 +133,7 @@ def mock_api(
     api.async_set_port_enabled = AsyncMock()
     api.async_set_port_name = AsyncMock()
     api.async_power_cycle_port = AsyncMock()
+    api.async_reboot = AsyncMock()
     api.async_ensure_trap_destination = AsyncMock()
     api.async_close = AsyncMock()
     with (

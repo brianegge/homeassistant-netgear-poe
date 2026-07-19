@@ -515,6 +515,15 @@ class NetgearLegacyApi:
             status = root.findtext(".//ActionStatus/statusString", "").strip()
             raise NetgearError(f"Could not activate {slot}: {status or code}")
 
+    async def async_reboot(self) -> None:
+        """Reboot the switch (drops PoE and the switch's uplink for ~a minute).
+
+        A cold reboot from the web UI, the recovery for a wedged PoE
+        controller or a hung SNMP agent. The `wcd` request below re-logs in as
+        needed, so no separate session setup is required here.
+        """
+        await self._async_reboot()
+
     async def _async_reboot(self) -> None:
         """Reboot the switch. Mirrors the Device Reboot screen's Reload set.
 

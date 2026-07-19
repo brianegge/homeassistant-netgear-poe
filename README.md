@@ -58,12 +58,26 @@ For each PoE port the integration creates:
   native PoE reset; legacy xui, classic HTML and S350 EmWeb models toggle PoE
   off and back on.
 
+There is also a device-level **Reboot** button that restarts the whole switch
+via its web UI — the recovery for a wedged PoE controller or a hung SNMP agent
+(see the **PoE controller stalled** sensor below). A reboot drops PoE — every
+powered camera and AP — and the switch's own uplink for a minute or more, so
+it is a deliberate, disruptive action; press it during a quiet window.
+
 With an SNMP community configured, you also get a per-port **link**
 binary sensor (`connectivity`) from IF-MIB `ifOperStatus`, polled every
 30 s. Enable **Listen for SNMP traps** and the integration also opens a
 trap receiver on UDP 162 and registers this host as a trap destination on
 the switch, so `linkUp`/`linkDown` events update the link sensors
 instantly (the poll remains a backstop for dropped UDP traps).
+
+There is also a **PoE controller stalled** problem binary sensor. It turns
+on when the switch keeps answering management reads but its PoE-status query
+hangs for two consecutive polls — a wedged PoE controller (seen after a
+firmware update on the xui switches) that a cold power-cycle clears. Power
+delivery keeps working while this is on, so it means "a cold reboot is
+needed", not "PoE is down"; point a notification automation at it to be told
+when a switch needs power-cycling.
 
 Plus one **PoE power** sensor with the switch's total PoE draw in watts,
 and a **Firmware** update entity. The latest known firmware per model is
@@ -112,6 +126,21 @@ Copy `custom_components/netgear_poe` into your Home Assistant `config`
 directory (or add this repository to HACS as a custom repository), restart
 Home Assistant, then add the **Netgear PoE Switch** integration with the
 switch hostname and admin password.
+
+## Removal
+
+To remove a switch, go to **Settings → Devices & Services**, open the
+**Netgear PoE Switch** integration, and use the three-dot menu on the entry to
+**Delete** it. That removes the entry and all of its entities, and the
+integration logs out of the switch as it unloads so it does not hold a session
+slot. If SNMP traps were enabled, the trap destination the integration
+registered on the switch is left in place; remove it from the switch's own
+Trap Configuration page if you no longer want it.
+
+To remove the integration entirely: delete every entry, remove the
+`netgear_poe:` line from `configuration.yaml` if you added it for discovery,
+then delete the `custom_components/netgear_poe` directory (or remove the HACS
+repository) and restart Home Assistant.
 
 ## Discovery (NSDP)
 
