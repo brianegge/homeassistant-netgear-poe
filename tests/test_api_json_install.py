@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiohttp
 import pytest
 
 from custom_components.netgear_poe.api import (
@@ -113,6 +114,7 @@ async def test_upload_posts_to_httpupload_cgi_then_polls() -> None:
     session = _upload_session()
     api = NetgearPoeApi("host", "pw", session=session)
     api._xsid_header = "XSIDTOKEN"
+    api._upload_path = "/cgi-bin/httpupload.cgi"  # skip the form probe
     # The flash-write poll comes back done immediately.
     api._authed_request = AsyncMock(return_value={"data": {"status": "success"}})
 
@@ -138,6 +140,41 @@ async def test_upload_posts_to_httpupload_cgi_then_polls() -> None:
     assert values["fileName"] == b"bix-bytes"
     # The status poll ran.
     api._authed_request.assert_awaited_with("get.cgi", "file_http_downloadStatus")
+
+
+async def test_upload_path_read_from_form() -> None:
+    """The upload CGI directory (/cgi-bin vs /cgi) is read from the switch form."""
+
+    def session_serving(page: str) -> MagicMock:
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.text = AsyncMock(return_value=page)
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=resp)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        s = MagicMock()
+        s.get = MagicMock(return_value=ctx)
+        s.close = AsyncMock()
+        return s
+
+    gs310 = NetgearPoeApi(
+        "h", "pw", session=session_serving('action = "/cgi-bin/httpupload.cgi";')
+    )
+    assert await gs310._async_upload_path() == "/cgi-bin/httpupload.cgi"
+
+    gs728 = NetgearPoeApi(
+        "h", "pw", session=session_serving('action = "/cgi/httpupload.cgi";')
+    )
+    assert await gs728._async_upload_path() == "/cgi/httpupload.cgi"
+
+    # Unreadable form falls back to the GS310TP default.
+    broken = MagicMock()
+    broken.get = MagicMock(side_effect=aiohttp.ClientError("boom"))
+    broken.close = AsyncMock()
+    assert (
+        await NetgearPoeApi("h", "pw", session=broken)._async_upload_path()
+        == "/cgi-bin/httpupload.cgi"
+    )
 
 
 async def test_wait_for_upload_succeeds_after_uploading() -> None:

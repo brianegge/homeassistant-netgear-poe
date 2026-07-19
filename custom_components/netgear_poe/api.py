@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import secrets
 import time
 from base64 import b64decode, b64encode
@@ -41,11 +42,13 @@ _SET_CGI = "set.cgi"
 # Firmware install. The switch writes flash while the upload POST is in flight
 # and then reports progress only as coarse state strings, so the byte upload
 # drives the progress bar and the flash-write phase is polled without a percent.
-# Firmware is uploaded to this bare CGI (no query string); the multipart
-# imgName names the target (inactive) slot. get.cgi?cmd=file_http_download is
-# only the precheck — the image POST goes here. Confirmed from packet captures
-# on 1.0.0.9, 1.0.1.2, 1.0.5.12 and GS728TPPv3 6.2.x, which all use this path.
-_UPLOAD_PATH = "/cgi-bin/httpupload.cgi"
+# The image is POSTed to a bare httpupload.cgi (no query string);
+# get.cgi?cmd=file_http_download is only the precheck. The directory varies by
+# model — GS310TP uses /cgi-bin/httpupload.cgi, GS728TPPv3 /cgi/httpupload.cgi —
+# so the path is read from the switch's own upload form (see _async_upload_path).
+_DEFAULT_UPLOAD_PATH = "/cgi-bin/httpupload.cgi"
+_UPLOAD_FORM_PAGE = "html/maintain_download_http.html"
+_UPLOAD_PATH_RE = re.compile(r"""["'](/[^"']*httpupload\.cgi)["']""")
 
 _FIRMWARE_UPLOAD_TIMEOUT = 600
 _DOWNLOAD_STATUS_POLL_SECONDS = 3
@@ -199,6 +202,8 @@ class NetgearPoeApi:
         # accepts either; async_login falls back to "hash" if "bj4" is rejected.
         self._hash_param = "bj4"
         self._xsid_header: str | None = None
+        # Firmware-upload CGI path; probed from the switch's form on first use.
+        self._upload_path: str | None = None
         self._login_lock = asyncio.Lock()
         self._port_names: dict[int, str] = {}
         self._poll_count = 0
@@ -546,6 +551,26 @@ class NetgearPoeApi:
         result = await self._authed_request(_GET_CGI, "file_dualStatus")
         return _parse_dual_status(result)
 
+    async def _async_upload_path(self) -> str:
+        """The httpupload.cgi path this switch uses, read from its upload form.
+
+        The directory varies by model (/cgi-bin vs /cgi), so rather than guess,
+        read the form's upload action once and cache it. On any trouble reading
+        the page, fall back to the GS310TP default.
+        """
+        if self._upload_path is None:
+            self._upload_path = _DEFAULT_UPLOAD_PATH
+            try:
+                url = f"{self._scheme}://{self.host}/{_UPLOAD_FORM_PAGE}"
+                async with self._get_session().get(url) as resp:
+                    resp.raise_for_status()
+                    match = _UPLOAD_PATH_RE.search(await resp.text())
+                    if match:
+                        self._upload_path = match.group(1)
+            except (aiohttp.ClientError, TimeoutError):
+                _LOGGER.debug("Could not read %s; using default upload path", url)
+        return self._upload_path
+
     async def _async_upload_firmware(
         self,
         image: bytes,
@@ -574,8 +599,7 @@ class NetgearPoeApi:
             ("imgName", "1"),
             ("fileName", None),
         ]
-        url = f"{self._scheme}://{self.host}{_UPLOAD_PATH}"
-
+        url = f"{self._scheme}://{self.host}{await self._async_upload_path()}"
         body, content_type = _multipart_upload_body(fields, filename, image)
         headers = {
             "X-Requested-With": "XMLHttpRequest",
