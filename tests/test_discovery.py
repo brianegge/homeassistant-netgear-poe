@@ -111,6 +111,44 @@ async def test_discovery_flow_dedupes_configured(
     assert result["reason"] == "already_configured"
 
 
+async def test_broadcast_addrs_cover_all_interfaces(hass: HomeAssistant) -> None:
+    """Each enabled interface contributes its subnet-directed broadcast.
+
+    The global 255.255.255.255 only leaves via the default-route interface,
+    so a multi-homed host must also target the other subnets directly.
+    """
+    from custom_components.netgear_poe import _async_broadcast_addrs
+
+    adapters = [
+        {"enabled": True, "ipv4": [{"address": "192.168.3.13", "network_prefix": 24}]},
+        {"enabled": True, "ipv4": [{"address": "192.168.1.109", "network_prefix": 24}]},
+        # Disabled adapters, loopback, and /32 contribute nothing.
+        {"enabled": False, "ipv4": [{"address": "10.0.0.5", "network_prefix": 24}]},
+        {"enabled": True, "ipv4": [{"address": "127.0.0.1", "network_prefix": 8}]},
+        {"enabled": True, "ipv4": [{"address": "10.1.2.3", "network_prefix": 32}]},
+    ]
+    with patch(
+        "custom_components.netgear_poe.network.async_get_adapters",
+        return_value=adapters,
+    ):
+        addrs = await _async_broadcast_addrs(hass)
+
+    assert addrs == ("192.168.1.255", "192.168.3.255", "255.255.255.255")
+
+
+async def test_broadcast_addrs_survive_helper_failure(hass: HomeAssistant) -> None:
+    """If adapter enumeration fails, fall back to the global broadcast."""
+    from custom_components.netgear_poe import _async_broadcast_addrs
+
+    with patch(
+        "custom_components.netgear_poe.network.async_get_adapters",
+        side_effect=RuntimeError("no network integration"),
+    ):
+        addrs = await _async_broadcast_addrs(hass)
+
+    assert addrs == ("255.255.255.255",)
+
+
 async def test_scanner_offers_pro_and_probed_plus_switches(
     hass: HomeAssistant,
 ) -> None:

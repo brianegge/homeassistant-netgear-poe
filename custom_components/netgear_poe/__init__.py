@@ -7,7 +7,9 @@ import logging
 import socket
 from dataclasses import dataclass
 from datetime import timedelta
+from ipaddress import IPv4Interface
 
+from homeassistant.components import network
 from homeassistant.config_entries import SOURCE_INTEGRATION_DISCOVERY, ConfigEntry
 from homeassistant.const import CONF_HOST, CONF_PASSWORD, EVENT_HOMEASSISTANT_STARTED
 from homeassistant.core import Event, HomeAssistant, callback
@@ -150,6 +152,31 @@ async def _async_setup_traps(
     return receiver
 
 
+async def _async_broadcast_addrs(hass: HomeAssistant) -> tuple[str, ...]:
+    """The global broadcast plus each interface's subnet-directed one.
+
+    The global 255.255.255.255 only leaves via the default-route interface,
+    so on a multi-homed host (VLANs, Docker) switches on any other subnet
+    never hear the request — NSDP must also target e.g. 192.168.1.255.
+    """
+    addrs = {"255.255.255.255"}
+    try:
+        adapters = await network.async_get_adapters(hass)
+    except Exception:  # noqa: BLE001 — discovery must survive without this
+        _LOGGER.debug("Could not enumerate network adapters", exc_info=True)
+        return tuple(addrs)
+    for adapter in adapters:
+        if not adapter["enabled"]:
+            continue
+        for ip in adapter["ipv4"]:
+            iface = IPv4Interface(f"{ip['address']}/{ip['network_prefix']}")
+            # /31, /32 and loopback have no usable directed broadcast.
+            if iface.ip.is_loopback or iface.network.prefixlen >= 31:
+                continue
+            addrs.add(str(iface.network.broadcast_address))
+    return tuple(sorted(addrs))
+
+
 async def _async_run_discovery(hass: HomeAssistant) -> None:
     """Run one NSDP scan and offer any new supported switches for setup."""
     configured = {
@@ -158,7 +185,10 @@ async def _async_run_discovery(hass: HomeAssistant) -> None:
         if entry.unique_id
     }
     try:
-        switches = await async_discover(duration=DISCOVERY_SCAN_SECONDS)
+        switches = await async_discover(
+            duration=DISCOVERY_SCAN_SECONDS,
+            broadcast_addrs=await _async_broadcast_addrs(hass),
+        )
     except Exception:
         _LOGGER.debug("NSDP discovery scan failed", exc_info=True)
         return

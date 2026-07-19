@@ -31,7 +31,11 @@ _SIGNATURE = b"NSDP"
 
 # (listen port, send port, is_pro)
 _PORT_PAIRS = ((63321, 63322, False), (63323, 63324, True))
-_BROADCAST_ADDRS = ("255.255.255.255",)
+# The global broadcast only leaves via the default-route interface, so on a
+# multi-homed host the caller should pass each interface's subnet-directed
+# broadcast (e.g. 192.168.1.255) as well, or switches on the other subnets
+# never hear the request.
+_DEFAULT_BROADCAST_ADDRS = ("255.255.255.255",)
 
 _TAG_MODEL = 0x0001
 _TAG_NAME = 0x0003
@@ -125,7 +129,9 @@ class _NsdpProtocol(asyncio.DatagramProtocol):
 
 
 async def async_discover(
-    duration: float = 30.0, burst_interval: float = 5.0
+    duration: float = 30.0,
+    burst_interval: float = 5.0,
+    broadcast_addrs: tuple[str, ...] = _DEFAULT_BROADCAST_ADDRS,
 ) -> list[NsdpSwitch]:
     """Broadcast NSDP requests for `duration` seconds and return switches found.
 
@@ -157,7 +163,7 @@ async def async_discover(
         deadline = loop.time() + duration
         while loop.time() < deadline:
             for transport, send_port in transports:
-                for addr in _BROADCAST_ADDRS:
+                for addr in broadcast_addrs:
                     try:
                         transport.sendto(_build_request(seq), (addr, send_port))
                         seq += 1
