@@ -257,3 +257,69 @@ async def test_logout_clears_xsrf() -> None:
 
     assert api._xsid_header is None
     assert api._xsrf == "null"
+
+
+async def test_set_port_name_uses_aj4_wire_format() -> None:
+    """The aj4 rename posts cmd=port_port with this firmware's row fields.
+
+    A live GS728TPPv3 answers port_port rows with admin/autoNego/speed/
+    duplex/flowCtrl/trap (not the older adminStatus/adminSpeed/...) and its
+    UI posts edits back to port_port addressed by a 0-based selEntry — the
+    base implementation would refuse with "Port settings incomplete".
+    """
+    api = NetgearJsonV2Api("host", "pw")
+    api._xsrf = "tok1"
+    calls: list[tuple[str, str, str | None]] = []
+
+    async def fake_request(
+        cgi: str, cmd: str, body: str | None = None, params: dict | None = None
+    ) -> dict:
+        calls.append((cgi, cmd, body))
+        if cgi == "get.cgi":
+            assert cmd == "port_port"
+            return {
+                "data": {
+                    "ports": [
+                        {
+                            "descp": "old name",
+                            "admin": 1,
+                            "autoNego": 1,
+                            "speed": "Auto",
+                            "duplex": 2,
+                            "flowCtrl": 0,
+                            "trap": 1,
+                            "mac": "28:94:01:BB:E5:C4",
+                            "ifindex": 26,
+                        }
+                    ]
+                }
+            }
+        return {"status": "ok"}
+
+    from unittest.mock import AsyncMock
+
+    api._authed_request = AsyncMock(side_effect=fake_request)
+    await api.async_set_port_name(26, "Storage Room 24")
+
+    cgi, cmd, body = calls[-1]
+    assert (cgi, cmd) == ("set.cgi", "port_port")
+    assert body == (
+        '{"_ds=1&descp=Storage%20Room%2024&trap=1&admin=1&autoNego=1'
+        '&speed=Auto&duplex=2&flowCtrl=0&selEntry=25&xsrf=tok1&_de=1":{}}'
+    )
+    assert api._port_names[26] == "Storage Room 24"
+
+
+async def test_set_port_name_aj4_error_status() -> None:
+    """A non-ok answer to the rename write raises."""
+    from unittest.mock import AsyncMock
+
+    api = NetgearJsonV2Api("host", "pw")
+    api._authed_request = AsyncMock(
+        side_effect=[
+            {"data": {"ports": [{"ifindex": 1, "descp": ""}]}},
+            {"status": "error"},
+        ]
+    )
+    with pytest.raises(NetgearError, match="Port name set failed"):
+        await api.async_set_port_name(1, "x")
