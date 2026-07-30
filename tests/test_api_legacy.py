@@ -868,3 +868,47 @@ async def test_set_vlan_port_membership_verifies() -> None:
 
     with pytest.raises(NetgearError, match="did not stick"):
         await api.async_set_vlan_port_membership(21, 3, 0)
+
+
+async def test_set_port_name_writes_description_and_powered_device() -> None:
+    """Renames post the port description; PoE ports also get poweredDevice."""
+    api = NetgearLegacyApi("host", "pw")
+    writes: list[str] = []
+
+    async def fake(path: str, body: str | None = None):
+        if body is not None:
+            writes.append(body)
+            return _parse_xml(SET_OK_XML)
+        assert path == "wcd?{PoEPSEInterfaceList}"
+        return _parse_xml(POE_LIST_XML)
+
+    api._request = AsyncMock(side_effect=fake)
+    await api.async_set_port_name(1, "garage-cam")
+
+    assert '<Standard802_3List action="set" set="set">' in writes[0]
+    assert (
+        "<Entry><interfaceName>g1</interfaceName><interfaceType>1"
+        "</interfaceType><interfaceID>1</interfaceID>"
+        "<interfaceDescription>garage-cam</interfaceDescription></Entry>"
+    ) in writes[0]
+    # Port 1 is in the PoE list, so the legacy PoE name is kept in step.
+    assert "<poweredDevice>garage-cam</poweredDevice>" in writes[1]
+
+
+async def test_set_port_name_non_poe_port() -> None:
+    """A port outside the PoE list still gets its description set."""
+    api = NetgearLegacyApi("host", "pw")
+    writes: list[str] = []
+
+    async def fake(path: str, body: str | None = None):
+        if body is not None:
+            writes.append(body)
+            return _parse_xml(SET_OK_XML)
+        return _parse_xml(POE_LIST_XML)  # ports 1-2 only
+
+    api._request = AsyncMock(side_effect=fake)
+    await api.async_set_port_name(16, "Storage Room 24")
+
+    assert len(writes) == 1
+    assert "<interfaceDescription>Storage Room 24</interfaceDescription>" in writes[0]
+    assert "<interfaceID>16</interfaceID>" in writes[0]

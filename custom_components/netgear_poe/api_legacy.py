@@ -24,6 +24,7 @@ CGI API in api.py. Their web UI is served under a per-device path prefix
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import re
 import xml.etree.ElementTree as ET
@@ -351,10 +352,36 @@ class NetgearLegacyApi:
         )
 
     async def async_set_port_name(self, port: int, name: str) -> None:
-        """Set the port's powered-device description (its name in HA)."""
-        await self._async_set_interface(
-            port, f"<poweredDevice>{escape(name)}</poweredDevice>"
+        """Set the port's description (SNMP ifAlias), PoE or not.
+
+        The xui UI edits descriptions through the Standard802_3List section
+        (its Port Configuration page posts <Entry> items carrying
+        interfaceDescription), which is also what the switch serves as
+        ifAlias. PoE ports additionally get the PoE "powered device" field
+        — what this backend historically set and what its PoE table shows —
+        so both spellings of the name stay in step.
+        """
+        body = (
+            "<?xml version='1.0' encoding='utf-8'?>"
+            '<DeviceConfiguration set="set">'
+            '<Standard802_3List action="set" set="set">'
+            f"<Entry><interfaceName>g{port}</interfaceName>"
+            "<interfaceType>1</interfaceType>"
+            f"<interfaceID>{port}</interfaceID>"
+            f"<interfaceDescription>{escape(name)}</interfaceDescription>"
+            "</Entry></Standard802_3List></DeviceConfiguration>"
         )
+        root = await self._request("wcd", body=body)
+        code = root.findtext(".//ActionStatus/statusCode", "").strip()
+        if code not in ("", "0"):
+            status = root.findtext(".//ActionStatus/statusString", "").strip()
+            raise NetgearError(f"Port name set failed: {status or code}")
+        # A non-PoE port has no poweredDevice; the description write above
+        # is the whole job there.
+        with contextlib.suppress(NetgearError):
+            await self._async_set_interface(
+                port, f"<poweredDevice>{escape(name)}</poweredDevice>"
+            )
 
     async def async_get_vlan_membership(self, vid: int) -> VlanMembership:
         """Read which ports and LAGs are members of a VLAN, and how.

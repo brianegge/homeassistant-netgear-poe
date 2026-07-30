@@ -107,8 +107,10 @@ band there — that pause is normal, not a hang.)
 `netgear_poe.set_port_name` sets a port's description on the switch,
 targeting the port's PoE switch entity. On JSON CGI and classic HTML models
 this is the port description (also visible as SNMP `ifAlias`); on legacy xui
-models it is the PoE "powered device" field. S350 EmWeb models don't support
-setting names over the web UI yet — SNMP `ifAlias` supplies their port names.
+models it sets the port description (`ifAlias`) on any port and keeps the
+PoE "powered device" field in step on PoE ports. S350 EmWeb models don't
+support setting names over the web UI yet — SNMP `ifAlias` supplies their
+port names.
 Entity names include the port description and are fixed at setup, so they
 pick up the new name after the integration is reloaded.
 
