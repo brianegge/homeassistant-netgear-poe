@@ -34,6 +34,9 @@ import aiohttp
 from yarl import URL
 
 from .api import (
+    VLAN_NOT_MEMBER,
+    VLAN_TAGGED,
+    VLAN_UNTAGGED,
     DualImageStatus,
     NetgearAuthError,
     NetgearError,
@@ -41,6 +44,7 @@ from .api import (
     PoeData,
     PoePort,
     SwitchInfo,
+    VlanMembership,
     _insecure_connector,
 )
 from .api_base_ui import NetgearBaseUiApi, NetgearCheetahApi
@@ -125,8 +129,9 @@ class NetgearLegacyApi:
 
     # This backend can flash firmware (see async_install_firmware).
     supports_firmware_install = True
-    # VLAN membership over this UI generation is not implemented.
-    supports_vlan_membership = False
+    # 802.1Q membership read/write over the VLANMembershipList wcd section
+    # (verified live on a GS716-era xui office switch).
+    supports_vlan_membership = True
 
     def __init__(
         self,
@@ -350,6 +355,133 @@ class NetgearLegacyApi:
         await self._async_set_interface(
             port, f"<poweredDevice>{escape(name)}</poweredDevice>"
         )
+
+    async def async_get_vlan_membership(self, vid: int) -> VlanMembership:
+        """Read which ports and LAGs are members of a VLAN, and how.
+
+        Wire format (from the switch's own VlanMembership_jq.htm): the
+        VLANMembershipList section lists members only, so the full port/LAG
+        universe comes from VLANInterfaceList (the PVID view, which carries
+        every interface) and non-members fill in as state 0. taggingMode
+        1 = untagged, 2 = tagged; interfaceType 1 = port, 2 = LAG.
+        """
+        root = await self._request("wcd?{VLANList}")
+        vlans = sorted(
+            int(v.findtext("VLANID", "0") or 0)
+            for v in root.iter("VLAN")
+            if v.findtext("VLANID")
+        )
+        if vid not in vlans:
+            raise NetgearError(
+                f"VLAN {vid} is not configured on {self.host} "
+                f"(configured: {vlans or 'unknown'})"
+            )
+
+        ports: dict[int, int] = {}
+        lags: dict[int, int] = {}
+        for if_type, target in ((1, ports), (2, lags)):
+            root = await self._request(
+                f"wcd?{{VLANInterfaceList&interfaceType={if_type}}}"
+            )
+            for iface in root.iter("Interface"):
+                try:
+                    target[int(iface.findtext("interfaceID", ""))] = VLAN_NOT_MEMBER
+                except ValueError:
+                    continue
+
+        root = await self._request(f"wcd?{{VLANMembershipList&VLANID={vid}}}")
+        name = ""
+        for vlan in root.iter("VLAN"):
+            if vlan.findtext("VLANID", "").strip() != str(vid):
+                continue
+            name = (vlan.findtext("VLANName") or "").strip()
+            for member in vlan.iter("VLANMember"):
+                try:
+                    index = int(member.findtext("interfaceID", ""))
+                except ValueError:
+                    continue
+                tagging = (member.findtext("taggingMode") or "").strip()
+                state = VLAN_UNTAGGED if tagging == "1" else VLAN_TAGGED
+                target = ports if member.findtext("interfaceType") == "1" else lags
+                target[index] = state
+        return VlanMembership(vid=vid, name=name, ports=ports, lags=lags, vlans=vlans)
+
+    async def async_set_vlan_membership(self, membership: VlanMembership) -> None:
+        """Write a VLAN's port/LAG membership map.
+
+        The xui section has merge semantics: a "set" list adds/updates
+        members and a separate "delete" list (interfaceName + interfaceType
+        only, per VlanMembership_jq.htm's getApplyPostData) removes them —
+        so the desired map is diffed against the switch's current one and
+        only the changes are posted. Reads can hold state 3 for dynamic
+        members; those write back as "not a member", like the vendor UI.
+        PVIDs are a separate section and are left untouched.
+        """
+        current = await self.async_get_vlan_membership(membership.vid)
+        sets: list[str] = []
+        deletes: list[str] = []
+        for if_type, desired, existing in (
+            (1, membership.ports, current.ports),
+            (2, membership.lags, current.lags),
+        ):
+            for index, state in sorted(desired.items()):
+                state = VLAN_NOT_MEMBER if state == 3 else state
+                if state == existing.get(index, VLAN_NOT_MEMBER):
+                    continue
+                if_name = f"g{index}" if if_type == 1 else f"LAG{index}"
+                entry = (
+                    f"<VLANMember><interfaceName>{if_name}</interfaceName>"
+                    f"<interfaceType>{if_type}</interfaceType>"
+                )
+                if state == VLAN_NOT_MEMBER:
+                    deletes.append(entry + "</VLANMember>")
+                else:
+                    sets.append(
+                        entry
+                        + "<membershipType>2</membershipType>"
+                        + f"<taggingMode>{state}</taggingMode></VLANMember>"
+                    )
+        if not sets and not deletes:
+            return
+        sections = ""
+        for action, entries in (("set", sets), ("delete", deletes)):
+            if entries:
+                sections += (
+                    f'<VLANMembershipList action="{action}" set="set">'
+                    f"<VLAN><VLANID>{membership.vid}</VLANID>"
+                    f"<MembershipList>{''.join(entries)}</MembershipList>"
+                    "</VLAN></VLANMembershipList>"
+                )
+        body = (
+            "<?xml version='1.0' encoding='utf-8'?>"
+            f'<DeviceConfiguration set="set">{sections}</DeviceConfiguration>'
+        )
+        root = await self._request("wcd", body=body)
+        code = root.findtext(".//ActionStatus/statusCode", "").strip()
+        if code not in ("", "0"):
+            status = root.findtext(".//ActionStatus/statusString", "").strip()
+            raise NetgearError(f"VLAN membership set failed: {status or code}")
+
+    async def async_set_vlan_port_membership(
+        self, vid: int, port: int, state: int
+    ) -> VlanMembership:
+        """Set one port's membership in a VLAN, preserving all other ports.
+
+        Returns the membership as re-read from the switch, so callers can
+        verify the write landed.
+        """
+        membership = await self.async_get_vlan_membership(vid)
+        if port not in membership.ports:
+            raise NetgearError(f"Port {port} not found in VLAN membership")
+        membership.ports[port] = state
+        await self.async_set_vlan_membership(membership)
+        after = await self.async_get_vlan_membership(vid)
+        if after.ports.get(port) != state:
+            raise NetgearError(
+                f"VLAN {vid} membership of port {port} did not stick "
+                f"(wanted {state}, switch reports {after.ports.get(port)})"
+            )
+        return after
 
     async def async_power_cycle_port(self, port: int) -> None:
         """Power cycle a port; the legacy UI has no native PoE reset."""

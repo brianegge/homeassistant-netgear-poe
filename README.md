@@ -128,9 +128,9 @@ port entity of the switch; the response covers the whole VLAN, with
 one VLAN, leaving every other port's membership and all PVIDs untouched
 (the write is a read-modify-write of the switch's full map, then re-read to
 verify it stuck). The VLAN must already exist on the switch. Both actions
-work on the JSON CGI generations (verified live on a GS728TPPv3); the xui,
-classic `/base/`, and S350 EmWeb generations answer with a "not supported"
-error.
+work on the JSON CGI generations (verified live on a GS728TPPv3) and on
+legacy xui models (verified live on a GS716-era switch); the classic
+`/base/` and S350 EmWeb generations answer with a "not supported" error.
 
 ```yaml
 action: netgear_poe.set_vlan_membership
