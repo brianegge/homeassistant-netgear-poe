@@ -234,6 +234,10 @@ class NetgearPoeApi:
         # Firmware-upload CGI path; probed from the switch's form on first use.
         self._upload_path: str | None = None
         self._login_lock = asyncio.Lock()
+        # Serializes the VLAN membership read-modify-write so concurrent
+        # single-port changes can't each start from the same map and clobber
+        # one another (see async_set_vlan_port_membership).
+        self._vlan_lock = asyncio.Lock()
         self._port_names: dict[int, str] = {}
         self._poll_count = 0
         # Fetch port names over the web CGI; disabled when SNMP (ifAlias) is
@@ -621,14 +625,16 @@ class NetgearPoeApi:
         """Set one port's membership in a VLAN, preserving all other ports.
 
         Returns the membership as re-read from the switch, so callers can
-        verify the write landed.
+        verify the write landed. The read-modify-write is held under a lock
+        so concurrent single-port changes don't clobber each other.
         """
-        membership = await self.async_get_vlan_membership(vid)
-        if port not in membership.ports:
-            raise NetgearError(f"Port {port} not found in VLAN membership")
-        membership.ports[port] = state
-        await self.async_set_vlan_membership(membership)
-        after = await self.async_get_vlan_membership(vid)
+        async with self._vlan_lock:
+            membership = await self.async_get_vlan_membership(vid)
+            if port not in membership.ports:
+                raise NetgearError(f"Port {port} not found in VLAN membership")
+            membership.ports[port] = state
+            await self.async_set_vlan_membership(membership)
+            after = await self.async_get_vlan_membership(vid)
         if after.ports.get(port) != state:
             raise NetgearError(
                 f"VLAN {vid} membership of port {port} did not stick "

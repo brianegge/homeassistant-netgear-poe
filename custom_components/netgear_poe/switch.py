@@ -210,6 +210,7 @@ class NetgearPoePortSwitch(NetgearPoePortEntity, SwitchEntity):
             ) from err
 
     def _require_vlan_support(self) -> None:
+        """Raise a clear error if this switch's backend can't do VLANs."""
         if not getattr(self.coordinator.api, "supports_vlan_membership", False):
             raise HomeAssistantError(
                 translation_domain=DOMAIN,

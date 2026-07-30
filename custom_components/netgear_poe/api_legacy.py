@@ -153,6 +153,9 @@ class NetgearLegacyApi:
         self._scheme = "https" if use_https else "http"
         self._cookie: str | None = None
         self._login_lock = asyncio.Lock()
+        # Serializes the VLAN membership read-modify-write (see
+        # async_set_vlan_port_membership).
+        self._vlan_lock = asyncio.Lock()
         # Interface names ("g5") keyed by port number, learned from polls.
         self._if_names: dict[int, str] = {}
         # Present for interface parity with NetgearPoeApi; the legacy UI has
@@ -429,8 +432,13 @@ class NetgearLegacyApi:
                     continue
                 tagging = (member.findtext("taggingMode") or "").strip()
                 state = VLAN_UNTAGGED if tagging == "1" else VLAN_TAGGED
-                target = ports if member.findtext("interfaceType") == "1" else lags
-                target[index] = state
+                if_type = (member.findtext("interfaceType") or "").strip()
+                if if_type == "1":
+                    ports[index] = state
+                elif if_type == "2":
+                    lags[index] = state
+                # Any other/blank interfaceType is neither a port nor a LAG;
+                # skip it rather than misfiling it under lags.
         return VlanMembership(vid=vid, name=name, ports=ports, lags=lags, vlans=vlans)
 
     async def async_set_vlan_membership(self, membership: VlanMembership) -> None:
@@ -495,14 +503,16 @@ class NetgearLegacyApi:
         """Set one port's membership in a VLAN, preserving all other ports.
 
         Returns the membership as re-read from the switch, so callers can
-        verify the write landed.
+        verify the write landed. The read-modify-write is held under a lock
+        so concurrent single-port changes don't clobber each other.
         """
-        membership = await self.async_get_vlan_membership(vid)
-        if port not in membership.ports:
-            raise NetgearError(f"Port {port} not found in VLAN membership")
-        membership.ports[port] = state
-        await self.async_set_vlan_membership(membership)
-        after = await self.async_get_vlan_membership(vid)
+        async with self._vlan_lock:
+            membership = await self.async_get_vlan_membership(vid)
+            if port not in membership.ports:
+                raise NetgearError(f"Port {port} not found in VLAN membership")
+            membership.ports[port] = state
+            await self.async_set_vlan_membership(membership)
+            after = await self.async_get_vlan_membership(vid)
         if after.ports.get(port) != state:
             raise NetgearError(
                 f"VLAN {vid} membership of port {port} did not stick "

@@ -591,3 +591,47 @@ async def test_set_vlan_port_membership_mismatch_raises() -> None:
     api._authed_request = AsyncMock(side_effect=fake_request)
     with pytest.raises(NetgearError, match="did not stick"):
         await api.async_set_vlan_port_membership(21, 2, 0)
+
+
+async def test_set_vlan_port_membership_serializes_concurrent_writes() -> None:
+    """Concurrent single-port writes must not clobber each other.
+
+    Two ports are flipped at once against a shared server-side map; the lock
+    around the read-modify-write means both changes survive (without it, the
+    second write starts from the pre-first-write map and erases port A).
+    """
+    import asyncio
+
+    api = NetgearPoeApi("host", "pw")
+    server = [0, 0, 0, 0]  # states for ports 1-4, mutated by "set"
+
+    async def fake_request(
+        cgi: str, cmd: str, body: str | None = None, params: dict | None = None
+    ) -> dict:
+        if cmd == "home_home":
+            return _HOME_HOME
+        if cgi == "set.cgi":
+            # Apply exactly what the body carries (full-map write).
+            for i in range(len(server)):
+                token = f"vlan_{i}="
+                if token in body:
+                    server[i] = int(body.split(token)[1].split("&")[0])
+            return {"status": "ok"}
+        # A read reflects current server state.
+        await asyncio.sleep(0)  # yield, widening the race window
+        return {
+            "data": {
+                "name": "cctv",
+                "selVid": 21,
+                "vlans": [1, 21],
+                "ports": [{"state": s} for s in server],
+            }
+        }
+
+    api._authed_request = AsyncMock(side_effect=fake_request)
+    await asyncio.gather(
+        api.async_set_vlan_port_membership(21, 1, 2),
+        api.async_set_vlan_port_membership(21, 2, 1),
+    )
+    assert server[0] == 2  # port 1 change survived
+    assert server[1] == 1  # port 2 change survived
