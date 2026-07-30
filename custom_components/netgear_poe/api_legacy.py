@@ -125,6 +125,8 @@ class NetgearLegacyApi:
 
     # This backend can flash firmware (see async_install_firmware).
     supports_firmware_install = True
+    # VLAN membership over this UI generation is not implemented.
+    supports_vlan_membership = False
 
     def __init__(
         self,

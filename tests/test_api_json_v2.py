@@ -123,7 +123,11 @@ async def test_login_flow_and_xsrf_lifecycle() -> None:
     calls: list[tuple[str, str, str | None]] = []
 
     async def fake_request(
-        self: NetgearPoeApi, cgi: str, cmd: str, body: str | None = None
+        self: NetgearPoeApi,
+        cgi: str,
+        cmd: str,
+        body: str | None = None,
+        params: dict | None = None,
     ) -> dict:
         calls.append((cgi, cmd, body))
         if cmd == "home_loginAuth":
@@ -163,7 +167,11 @@ async def test_login_rejects_error_status() -> None:
     api = NetgearJsonV2Api("host", "pw")
 
     async def fake_request(
-        self: NetgearPoeApi, cgi: str, cmd: str, body: str | None = None
+        self: NetgearPoeApi,
+        cgi: str,
+        cmd: str,
+        body: str | None = None,
+        params: dict | None = None,
     ) -> dict:
         return {"status": "error", "msg": "lang('err','errLoginFail')"}
 
@@ -179,7 +187,11 @@ async def test_login_survives_home_home_failure() -> None:
     api = NetgearJsonV2Api("host", "pw")
 
     async def fake_request(
-        self: NetgearPoeApi, cgi: str, cmd: str, body: str | None = None
+        self: NetgearPoeApi,
+        cgi: str,
+        cmd: str,
+        body: str | None = None,
+        params: dict | None = None,
     ) -> dict:
         if cmd == "home_loginAuth":
             return {"status": "ok", "authId": "deadbeef"}
@@ -200,7 +212,11 @@ async def test_relogin_resets_stale_xsrf() -> None:
     login_bodies: list[str] = []
 
     async def fake_request(
-        self: NetgearPoeApi, cgi: str, cmd: str, body: str | None = None
+        self: NetgearPoeApi,
+        cgi: str,
+        cmd: str,
+        body: str | None = None,
+        params: dict | None = None,
     ) -> dict:
         if cmd == "home_loginAuth":
             login_bodies.append(body or "")
@@ -226,7 +242,11 @@ async def test_logout_clears_xsrf() -> None:
     api._xsrf = "tok1"
 
     async def fake_request(
-        self: NetgearPoeApi, cgi: str, cmd: str, body: str | None = None
+        self: NetgearPoeApi,
+        cgi: str,
+        cmd: str,
+        body: str | None = None,
+        params: dict | None = None,
     ) -> dict:
         assert cmd == "home_logout"
         assert "xsrf=tok1" in (body or "")

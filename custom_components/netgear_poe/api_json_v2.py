@@ -73,9 +73,13 @@ class NetgearJsonV2Api(NetgearPoeApi):
         return str(result.get("status", "")).lower() != "error"
 
     async def _request(
-        self, cgi: str, cmd: str, body: str | None = None
+        self,
+        cgi: str,
+        cmd: str,
+        body: str | None = None,
+        params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        result = await super()._request(cgi, cmd, body)
+        result = await super()._request(cgi, cmd, body, params)
         self._harvest_xsrf(result)
         return result
 

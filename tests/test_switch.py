@@ -9,8 +9,13 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.netgear_poe.api import NetgearError
-from custom_components.netgear_poe.const import DOMAIN, SERVICE_SET_PORT_NAME
+from custom_components.netgear_poe.api import NetgearError, VlanMembership
+from custom_components.netgear_poe.const import (
+    DOMAIN,
+    SERVICE_GET_VLAN_MEMBERSHIP,
+    SERVICE_SET_PORT_NAME,
+    SERVICE_SET_VLAN_MEMBERSHIP,
+)
 
 from .conftest import setup_integration
 
@@ -123,3 +128,101 @@ async def test_switch_set_failure(
             {"entity_id": PORT_1_ENTITY},
             blocking=True,
         )
+
+
+async def test_set_vlan_membership(
+    hass: HomeAssistant,
+    mock_api: MagicMock,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """The set_vlan_membership action maps the state name to the wire value."""
+    await setup_integration(hass, mock_config_entry)
+
+    await hass.services.async_call(
+        DOMAIN,
+        SERVICE_SET_VLAN_MEMBERSHIP,
+        {"entity_id": PORT_1_ENTITY, "vlan": 21, "membership": "tagged"},
+        blocking=True,
+    )
+    mock_api.async_set_vlan_port_membership.assert_awaited_with(21, 1, 2)
+
+    await hass.services.async_call(
+        DOMAIN,
+        SERVICE_SET_VLAN_MEMBERSHIP,
+        {"entity_id": PORT_2_ENTITY, "vlan": 21, "membership": "none"},
+        blocking=True,
+    )
+    mock_api.async_set_vlan_port_membership.assert_awaited_with(21, 2, 0)
+
+
+async def test_get_vlan_membership_response(
+    hass: HomeAssistant,
+    mock_api: MagicMock,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """The get_vlan_membership action answers the whole VLAN's map by name."""
+    await setup_integration(hass, mock_config_entry)
+    mock_api.async_get_vlan_membership.return_value = VlanMembership(
+        vid=21,
+        name="cctv",
+        ports={1: 2, 2: 0, 3: 3},
+        lags={1: 1},
+        vlans=[1, 21],
+    )
+
+    response = await hass.services.async_call(
+        DOMAIN,
+        SERVICE_GET_VLAN_MEMBERSHIP,
+        {"entity_id": PORT_1_ENTITY, "vlan": 21},
+        blocking=True,
+        return_response=True,
+    )
+
+    mock_api.async_get_vlan_membership.assert_awaited_with(21)
+    assert response == {
+        PORT_1_ENTITY: {
+            "vlan": 21,
+            "name": "cctv",
+            "port_membership": "tagged",
+            "ports": {1: "tagged", 2: "none", 3: "dynamic"},
+            "lags": {1: "untagged"},
+            "configured_vlans": [1, 21],
+        }
+    }
+
+
+async def test_vlan_membership_failure(
+    hass: HomeAssistant,
+    mock_api: MagicMock,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """A switch error surfaces as a HomeAssistantError."""
+    await setup_integration(hass, mock_config_entry)
+    mock_api.async_set_vlan_port_membership.side_effect = NetgearError("denied")
+
+    with pytest.raises(HomeAssistantError):
+        await hass.services.async_call(
+            DOMAIN,
+            SERVICE_SET_VLAN_MEMBERSHIP,
+            {"entity_id": PORT_1_ENTITY, "vlan": 21, "membership": "tagged"},
+            blocking=True,
+        )
+
+
+async def test_vlan_membership_unsupported_backend(
+    hass: HomeAssistant,
+    mock_api: MagicMock,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """Backends without vlan_membership answer with a clear error."""
+    mock_api.supports_vlan_membership = False
+    await setup_integration(hass, mock_config_entry)
+
+    with pytest.raises(HomeAssistantError):
+        await hass.services.async_call(
+            DOMAIN,
+            SERVICE_SET_VLAN_MEMBERSHIP,
+            {"entity_id": PORT_1_ENTITY, "vlan": 21, "membership": "none"},
+            blocking=True,
+        )
+    mock_api.async_set_vlan_port_membership.assert_not_awaited()

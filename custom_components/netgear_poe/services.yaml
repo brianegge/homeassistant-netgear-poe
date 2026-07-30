@@ -9,3 +9,42 @@ set_port_name:
       example: garage-cam
       selector:
         text:
+
+get_vlan_membership:
+  target:
+    entity:
+      integration: netgear_poe
+      domain: switch
+  fields:
+    vlan:
+      required: true
+      example: 21
+      selector:
+        number:
+          min: 1
+          max: 4094
+          mode: box
+
+set_vlan_membership:
+  target:
+    entity:
+      integration: netgear_poe
+      domain: switch
+  fields:
+    vlan:
+      required: true
+      example: 21
+      selector:
+        number:
+          min: 1
+          max: 4094
+          mode: box
+    membership:
+      required: true
+      example: tagged
+      selector:
+        select:
+          options:
+            - none
+            - untagged
+            - tagged

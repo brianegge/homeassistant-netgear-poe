@@ -26,7 +26,7 @@ from base64 import b64decode, b64encode
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from hashlib import md5
-from typing import Any
+from typing import Any, Final
 from urllib.parse import quote
 
 import aiohttp
@@ -157,6 +157,31 @@ class PoeData:
     link: dict[int, bool] = field(default_factory=dict)
 
 
+# 802.1Q membership states, as the vlan_membership CGI encodes them. Reads can
+# also return 3 (a dynamically-learned member, e.g. GVRP); the switch's own UI
+# posts those back as 0, so writes here do the same.
+VLAN_NOT_MEMBER: Final = 0
+VLAN_UNTAGGED: Final = 1
+VLAN_TAGGED: Final = 2
+
+
+@dataclass
+class VlanMembership:
+    """802.1Q membership of every port and LAG in one VLAN.
+
+    States are keyed by 1-based front-panel port / LAG number and hold the
+    VLAN_* constants above (reads may also hold 3 for a dynamic member).
+    `vlans` lists every VLAN configured on the switch, as returned alongside
+    the membership read.
+    """
+
+    vid: int
+    name: str
+    ports: dict[int, int]
+    lags: dict[int, int]
+    vlans: list[int] = field(default_factory=list)
+
+
 @dataclass
 class DualImageStatus:
     """What each firmware slot holds and which one the switch is running.
@@ -182,6 +207,10 @@ class NetgearPoeApi:
     # Flash firmware via the file_http_download / file_dualConf / sys_reboot
     # CGI commands (see async_install_firmware). Inherited by NetgearJsonV2Api.
     supports_firmware_install = True
+    # 802.1Q membership read/write via the vlan_membership CGI command
+    # (verified live on a GS728TPPv3 6.2.x; both JSON generations share their
+    # command set). The other web UI generations don't implement it yet.
+    supports_vlan_membership = True
 
     def __init__(
         self,
@@ -210,6 +239,9 @@ class NetgearPoeApi:
         # Fetch port names over the web CGI; disabled when SNMP (ifAlias) is
         # the name source, to avoid an extra web login per refresh.
         self.web_port_names_enabled = True
+        # LAG slot count for splitting port-indexed arrays; read once from
+        # home_home (see _async_lag_count).
+        self._lag_count: int | None = None
 
     def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None:
@@ -239,8 +271,11 @@ class NetgearPoeApi:
         """Whether the home_loginAuth response accepted the password post."""
         return result.get("status") == "ok"
 
-    def _url(self, cgi: str, cmd: str) -> str:
-        query = f"cmd={cmd}&dummy={int(time.time() * 1000)}"
+    def _url(self, cgi: str, cmd: str, params: dict[str, Any] | None = None) -> str:
+        query = f"cmd={cmd}"
+        for key, value in (params or {}).items():
+            query += f"&{key}={value}"
+        query += f"&dummy={int(time.time() * 1000)}"
         checksum = md5(query.encode()).hexdigest()
         return (
             f"{self._scheme}://{self.host}/cgi/{cgi}"
@@ -248,7 +283,11 @@ class NetgearPoeApi:
         )
 
     async def _request(
-        self, cgi: str, cmd: str, body: str | None = None
+        self,
+        cgi: str,
+        cmd: str,
+        body: str | None = None,
+        params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         session = self._get_session()
         headers = {}
@@ -256,11 +295,11 @@ class NetgearPoeApi:
             headers["X-CSRF-XSID"] = self._xsid_header
         try:
             if body is None:
-                resp = await session.get(self._url(cgi, cmd), headers=headers)
+                resp = await session.get(self._url(cgi, cmd, params), headers=headers)
             else:
                 headers["Content-Type"] = "application/json"
                 resp = await session.post(
-                    self._url(cgi, cmd), data=body, headers=headers
+                    self._url(cgi, cmd, params), data=body, headers=headers
                 )
             resp.raise_for_status()
             return await resp.json(content_type=None)
@@ -352,17 +391,21 @@ class NetgearPoeApi:
             return await self._request(_SET_CGI, "home_loginAuth", body)
 
     async def _authed_request(
-        self, cgi: str, cmd: str, body: str | None = None
+        self,
+        cgi: str,
+        cmd: str,
+        body: str | None = None,
+        params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Request with automatic (re)login."""
         async with self._login_lock:
             if self._xsid_header is None:
                 await self.async_login()
-        result = await self._request(cgi, cmd, body)
+        result = await self._request(cgi, cmd, body, params)
         if _is_auth_failure(result):
             async with self._login_lock:
                 await self.async_login()
-            result = await self._request(cgi, cmd, body)
+            result = await self._request(cgi, cmd, body, params)
             if _is_auth_failure(result):
                 raise NetgearAuthError(f"Re-login failed for {cmd}: {result}")
         return result
@@ -502,6 +545,96 @@ class NetgearPoeApi:
             self._port_names[port] = name
         else:
             self._port_names.pop(port, None)
+
+    async def _async_lag_count(self) -> int:
+        """How many LAG slots trail the physical ports in port-indexed arrays.
+
+        The vlan_membership read returns one flat array of ports followed by
+        LAGs with no marker between them; the switch's own home.html derives
+        the split from home_home's lags list, so this does the same. Cached —
+        the LAG count is hardware, it never changes at runtime.
+        """
+        if self._lag_count is None:
+            result = await self._authed_request(_GET_CGI, "home_home")
+            lags = result.get("data", {}).get("lags")
+            self._lag_count = len(lags) if isinstance(lags, list) else 0
+        return self._lag_count
+
+    async def async_get_vlan_membership(self, vid: int) -> VlanMembership:
+        """Read which ports and LAGs are members of a VLAN, and how.
+
+        Wire format (reverse-engineered from the switch's own
+        switch_vlan_mbr.html): GET vlan_membership with a `vlan` query
+        parameter answers data.ports[i].state for every port, then every
+        LAG. The switch never rejects a bad VID — asked about one it does
+        not have, it echoes it back with an all-zero map (observed live on a
+        GS728TPPv3), and firmware that ignores the parameter answers for
+        another VLAN entirely. Both are errors here, not data: the VID must
+        appear in the response's own list of configured VLANs.
+        """
+        result = await self._authed_request(
+            _GET_CGI, "vlan_membership", params={"vlan": vid}
+        )
+        data = result.get("data", {})
+        vlans = [int(v) for v in data.get("vlans", [])]
+        if vid not in vlans or int(data.get("selVid", 0)) != vid:
+            raise NetgearError(
+                f"VLAN {vid} is not configured on {self.host} "
+                f"(configured: {vlans or 'unknown'})"
+            )
+        states = [int(row.get("state", 0)) for row in data.get("ports", [])]
+        num_lags = min(await self._async_lag_count(), len(states))
+        num_ports = len(states) - num_lags
+        return VlanMembership(
+            vid=vid,
+            name=str(data.get("name", "")),
+            ports={i + 1: state for i, state in enumerate(states[:num_ports])},
+            lags={i + 1: state for i, state in enumerate(states[num_ports:])},
+            vlans=vlans,
+        )
+
+    async def async_set_vlan_membership(self, membership: VlanMembership) -> None:
+        """Write a VLAN's full port/LAG membership map.
+
+        The CGI takes the whole map per write (field names vlan_<i> for
+        ports, vlanLag_<i> for LAGs, both 0-indexed), so callers wanting a
+        single-port change go through async_set_vlan_port_membership. Reads
+        can hold state 3 for dynamically-learned members; the switch UI
+        posts those back as "not a member" and so does this. PVID is a
+        separate setting and is left untouched.
+        """
+        fields: dict[str, Any] = {"vlan": membership.vid}
+        for port, state in sorted(membership.ports.items()):
+            fields[f"vlan_{port - 1}"] = 0 if state == 3 else state
+        for lag, state in sorted(membership.lags.items()):
+            fields[f"vlanLag_{lag - 1}"] = 0 if state == 3 else state
+        fields["xsrf"] = "undefined"
+        result = await self._authed_request(
+            _SET_CGI, "vlan_membership", self._form_body(fields)
+        )
+        if result.get("status") != "ok":
+            raise NetgearError(f"VLAN membership set failed: {result}")
+
+    async def async_set_vlan_port_membership(
+        self, vid: int, port: int, state: int
+    ) -> VlanMembership:
+        """Set one port's membership in a VLAN, preserving all other ports.
+
+        Returns the membership as re-read from the switch, so callers can
+        verify the write landed.
+        """
+        membership = await self.async_get_vlan_membership(vid)
+        if port not in membership.ports:
+            raise NetgearError(f"Port {port} not found in VLAN membership")
+        membership.ports[port] = state
+        await self.async_set_vlan_membership(membership)
+        after = await self.async_get_vlan_membership(vid)
+        if after.ports.get(port) != state:
+            raise NetgearError(
+                f"VLAN {vid} membership of port {port} did not stick "
+                f"(wanted {state}, switch reports {after.ports.get(port)})"
+            )
+        return after
 
     async def async_ensure_trap_destination(self, dest_ip: str, community: str) -> None:
         """Register an enabled v2c trap destination on the switch.

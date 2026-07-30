@@ -120,6 +120,27 @@ data:
   name: driveway-cam
 ```
 
+`netgear_poe.get_vlan_membership` reads a VLAN's 802.1Q membership map —
+which ports and LAGs carry it tagged, untagged, or not at all. Target any
+port entity of the switch; the response covers the whole VLAN, with
+`port_membership` holding the targeted port's own state.
+`netgear_poe.set_vlan_membership` changes the targeted port's membership in
+one VLAN, leaving every other port's membership and all PVIDs untouched
+(the write is a read-modify-write of the switch's full map, then re-read to
+verify it stuck). The VLAN must already exist on the switch. Both actions
+work on the JSON CGI generations (verified live on a GS728TPPv3); the xui,
+classic `/base/`, and S350 EmWeb generations answer with a "not supported"
+error.
+
+```yaml
+action: netgear_poe.set_vlan_membership
+target:
+  entity_id: switch.boiler_switch_port_24_poe
+data:
+  vlan: 21
+  membership: none
+```
+
 ## Installation
 
 Copy `custom_components/netgear_poe` into your Home Assistant `config`

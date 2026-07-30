@@ -140,6 +140,9 @@ def mock_api(
     api.async_get_data = AsyncMock(return_value=make_poe_data())
     api.async_set_port_enabled = AsyncMock()
     api.async_set_port_name = AsyncMock()
+    api.supports_vlan_membership = True
+    api.async_get_vlan_membership = AsyncMock()
+    api.async_set_vlan_port_membership = AsyncMock()
     api.async_power_cycle_port = AsyncMock()
     api.async_reboot = AsyncMock()
     api.async_ensure_trap_destination = AsyncMock()
