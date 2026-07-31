@@ -417,3 +417,220 @@ async def test_login_wrong_password_reports_fail() -> None:
     api._request = AsyncMock(side_effect=fake_request)
     with pytest.raises(NetgearAuthError):
         await api.async_login()
+
+
+def test_url_hashes_extra_params() -> None:
+    """Extra query params sit between cmd and dummy, inside the bj4 hash."""
+    from hashlib import md5
+
+    api = NetgearPoeApi("host", "pw")
+    url = api._url("get.cgi", "vlan_membership", {"vlan": 21})
+
+    query = url.split("?", 1)[1]
+    hashed, bj4 = query.rsplit("&bj4=", 1)
+    assert hashed.startswith("cmd=vlan_membership&vlan=21&dummy=")
+    assert bj4 == md5(hashed.encode()).hexdigest()
+
+
+# A 6-port + 2-LAG switch's vlan_membership read: ports first, LAGs after,
+# no marker between them (the split comes from home_home's lags list).
+_VLAN_READ = {
+    "data": {
+        "name": "cctv",
+        "type": 2,
+        "selVid": 21,
+        "vlans": [1, 21],
+        "ports": [{"state": s} for s in (0, 2, 1, 3, 0, 2, 1, 0)],
+    }
+}
+_HOME_HOME = {"data": {"lags": [{}, {}], "ports": [{}] * 9}}
+
+
+async def test_get_vlan_membership_splits_ports_and_lags() -> None:
+    """Membership reads split the flat state array by home_home's LAG count."""
+    api = NetgearPoeApi("host", "pw")
+
+    async def fake_request(
+        cgi: str, cmd: str, body: str | None = None, params: dict | None = None
+    ) -> dict:
+        if cmd == "home_home":
+            return _HOME_HOME
+        assert cmd == "vlan_membership"
+        assert params == {"vlan": 21}
+        return _VLAN_READ
+
+    api._authed_request = AsyncMock(side_effect=fake_request)
+    membership = await api.async_get_vlan_membership(21)
+
+    assert membership.vid == 21
+    assert membership.name == "cctv"
+    assert membership.ports == {1: 0, 2: 2, 3: 1, 4: 3, 5: 0, 6: 2}
+    assert membership.lags == {1: 1, 2: 0}
+    assert membership.vlans == [1, 21]
+
+    # The LAG count is cached; a second read must not re-fetch home_home.
+    await api.async_get_vlan_membership(21)
+    cmds = [c.args[1] for c in api._authed_request.await_args_list]
+    assert cmds.count("home_home") == 1
+
+
+async def test_get_vlan_membership_unknown_vid_raises() -> None:
+    """A VID absent from the switch's own VLAN list is an error.
+
+    The switch never rejects a bad VID: this firmware echoes it back with an
+    all-zero map, and firmware that ignores the parameter answers for
+    another VLAN. Both shapes must raise rather than read as membership.
+    """
+    api = NetgearPoeApi("host", "pw")
+
+    async def fake_request(
+        cgi: str, cmd: str, body: str | None = None, params: dict | None = None
+    ) -> dict:
+        if cmd == "home_home":
+            return _HOME_HOME
+        if params == {"vlan": 99}:  # echoed back, but not in vlans
+            return {
+                "data": {
+                    "name": "",
+                    "selVid": 99,
+                    "vlans": [1, 21],
+                    "ports": [{"state": 0}] * 8,
+                }
+            }
+        return _VLAN_READ  # answers for selVid 21 regardless of the ask
+
+    api._authed_request = AsyncMock(side_effect=fake_request)
+    with pytest.raises(NetgearError, match="VLAN 99 is not configured"):
+        await api.async_get_vlan_membership(99)
+    with pytest.raises(NetgearError, match="VLAN 30 is not configured"):
+        await api.async_get_vlan_membership(30)
+
+
+async def test_set_vlan_membership_body() -> None:
+    """The write carries the full 0-indexed map, dynamic members as 0."""
+    from custom_components.netgear_poe.api import VlanMembership
+
+    api = NetgearPoeApi("host", "pw")
+    api._authed_request = AsyncMock(return_value={"status": "ok"})
+
+    await api.async_set_vlan_membership(
+        VlanMembership(
+            vid=21,
+            name="cctv",
+            ports={1: 0, 2: 2, 3: 1, 4: 3},
+            lags={1: 3, 2: 2},
+        )
+    )
+
+    cgi, cmd, body = api._authed_request.await_args.args
+    assert (cgi, cmd) == ("set.cgi", "vlan_membership")
+    assert body == (
+        '{"_ds=1&vlan=21&vlan_0=0&vlan_1=2&vlan_2=1&vlan_3=0'
+        '&vlanLag_0=0&vlanLag_1=2&xsrf=undefined&_de=1":{}}'
+    )
+
+
+async def test_set_vlan_membership_error_status() -> None:
+    """A non-ok answer to the write is an error."""
+    from custom_components.netgear_poe.api import VlanMembership
+
+    api = NetgearPoeApi("host", "pw")
+    api._authed_request = AsyncMock(return_value={"status": "error"})
+    membership = VlanMembership(vid=21, name="", ports={1: 0}, lags={})
+
+    with pytest.raises(NetgearError, match="VLAN membership set failed"):
+        await api.async_set_vlan_membership(membership)
+
+
+async def test_set_vlan_port_membership_verifies_write() -> None:
+    """The single-port write preserves the map and re-reads to verify."""
+    api = NetgearPoeApi("host", "pw")
+    states = [0, 2, 1, 3, 0, 2, 1, 0]
+    set_bodies: list[str] = []
+
+    async def fake_request(
+        cgi: str, cmd: str, body: str | None = None, params: dict | None = None
+    ) -> dict:
+        if cmd == "home_home":
+            return _HOME_HOME
+        if cgi == "set.cgi":
+            set_bodies.append(body or "")
+            states[3] = 0  # the switch applies the change
+            return {"status": "ok"}
+        return {
+            "data": {
+                "name": "cctv",
+                "selVid": 21,
+                "vlans": [1, 21],
+                "ports": [{"state": s} for s in states],
+            }
+        }
+
+    api._authed_request = AsyncMock(side_effect=fake_request)
+    after = await api.async_set_vlan_port_membership(21, 4, 0)
+
+    assert after.ports[4] == 0
+    # Untouched ports were posted back unchanged (state 3 mapped to 0).
+    assert "vlan_1=2&vlan_2=1&vlan_3=0" in set_bodies[0]
+
+
+async def test_set_vlan_port_membership_mismatch_raises() -> None:
+    """A write the switch silently ignores must not report success."""
+    api = NetgearPoeApi("host", "pw")
+
+    async def fake_request(
+        cgi: str, cmd: str, body: str | None = None, params: dict | None = None
+    ) -> dict:
+        if cmd == "home_home":
+            return _HOME_HOME
+        if cgi == "set.cgi":
+            return {"status": "ok"}  # claims ok, changes nothing
+        return _VLAN_READ
+
+    api._authed_request = AsyncMock(side_effect=fake_request)
+    with pytest.raises(NetgearError, match="did not stick"):
+        await api.async_set_vlan_port_membership(21, 2, 0)
+
+
+async def test_set_vlan_port_membership_serializes_concurrent_writes() -> None:
+    """Concurrent single-port writes must not clobber each other.
+
+    Two ports are flipped at once against a shared server-side map; the lock
+    around the read-modify-write means both changes survive (without it, the
+    second write starts from the pre-first-write map and erases port A).
+    """
+    import asyncio
+
+    api = NetgearPoeApi("host", "pw")
+    server = [0, 0, 0, 0]  # states for ports 1-4, mutated by "set"
+
+    async def fake_request(
+        cgi: str, cmd: str, body: str | None = None, params: dict | None = None
+    ) -> dict:
+        if cmd == "home_home":
+            return _HOME_HOME
+        if cgi == "set.cgi":
+            # Apply exactly what the body carries (full-map write).
+            for i in range(len(server)):
+                token = f"vlan_{i}="
+                if token in body:
+                    server[i] = int(body.split(token)[1].split("&")[0])
+            return {"status": "ok"}
+        # A read reflects current server state.
+        await asyncio.sleep(0)  # yield, widening the race window
+        return {
+            "data": {
+                "name": "cctv",
+                "selVid": 21,
+                "vlans": [1, 21],
+                "ports": [{"state": s} for s in server],
+            }
+        }
+
+    api._authed_request = AsyncMock(side_effect=fake_request)
+    await asyncio.gather(
+        api.async_set_vlan_port_membership(21, 1, 2),
+        api.async_set_vlan_port_membership(21, 2, 1),
+    )
+    assert server[0] == 2  # port 1 change survived
+    assert server[1] == 1  # port 2 change survived

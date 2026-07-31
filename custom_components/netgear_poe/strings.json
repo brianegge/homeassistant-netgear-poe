@@ -89,6 +89,12 @@
     },
     "reboot_failed": {
       "message": "Failed to reboot switch at {host}: {error}"
+    },
+    "vlan_membership_failed": {
+      "message": "Failed to read or write VLAN {vlan} membership on {host}: {error}"
+    },
+    "vlan_membership_not_supported": {
+      "message": "The switch at {host} does not support VLAN membership over its web UI generation"
     }
   },
   "entity": {
@@ -116,6 +122,30 @@
         "name": {
           "name": "Name",
           "description": "New port description. An empty string clears it."
+        }
+      }
+    },
+    "get_vlan_membership": {
+      "name": "Get VLAN membership",
+      "description": "Reads which ports and LAGs are members of a VLAN (tagged, untagged, or none). Target any port of the switch; the response covers the whole VLAN.",
+      "fields": {
+        "vlan": {
+          "name": "VLAN ID",
+          "description": "The 802.1Q VLAN ID to read (1-4094)."
+        }
+      }
+    },
+    "set_vlan_membership": {
+      "name": "Set VLAN membership",
+      "description": "Sets the targeted port's membership in a VLAN. All other ports and every PVID are preserved.",
+      "fields": {
+        "vlan": {
+          "name": "VLAN ID",
+          "description": "The 802.1Q VLAN ID to change (1-4094). It must already exist on the switch."
+        },
+        "membership": {
+          "name": "Membership",
+          "description": "Whether the port carries the VLAN tagged, untagged, or not at all."
         }
       }
     }

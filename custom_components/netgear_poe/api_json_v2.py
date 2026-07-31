@@ -32,8 +32,12 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+from urllib.parse import quote
 
 from .api import NetgearError, NetgearPoeApi, form_body
+
+_GET_CGI = "get.cgi"
+_SET_CGI = "set.cgi"
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -73,9 +77,13 @@ class NetgearJsonV2Api(NetgearPoeApi):
         return str(result.get("status", "")).lower() != "error"
 
     async def _request(
-        self, cgi: str, cmd: str, body: str | None = None
+        self,
+        cgi: str,
+        cmd: str,
+        body: str | None = None,
+        params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        result = await super()._request(cgi, cmd, body)
+        result = await super()._request(cgi, cmd, body, params)
         self._harvest_xsrf(result)
         return result
 
@@ -104,6 +112,45 @@ class NetgearJsonV2Api(NetgearPoeApi):
             _LOGGER.debug(
                 "Could not fetch the xsrf token from %s", self.host, exc_info=True
             )
+
+    async def async_set_port_name(self, port: int, name: str) -> None:
+        """Set a port's description (aj4 wire format).
+
+        This firmware renamed the port-edit exchange: reads and writes both
+        go through cmd=port_port (the older generation writes to
+        port_portEdit), the row fields are admin/autoNego/speed/duplex/
+        flowCtrl/trap (not adminStatus/adminSpeed/...), and the edited row
+        is addressed by a 0-based selEntry index — all per the switch's own
+        switch_ports_port.html formEdit(). The base implementation would
+        refuse with "Port settings incomplete" on every port here.
+        """
+        result = await self._authed_request(_GET_CGI, "port_port")
+        row: dict[str, Any] | None = None
+        for index, candidate in enumerate(result.get("data", {}).get("ports", [])):
+            if int(candidate.get("ifindex", index + 1)) == port:
+                row = candidate
+                break
+        if row is None:
+            raise NetgearError(f"Port {port} not found")
+        fields = {
+            "descp": quote(name, safe=""),
+            "trap": row.get("trap", 1),
+            "admin": row.get("admin", 1),
+            "autoNego": row.get("autoNego", 1),
+            "speed": row.get("speed", "Auto"),
+            "duplex": row.get("duplex", 2),
+            "flowCtrl": row.get("flowCtrl", 0),
+            "selEntry": port - 1,
+        }
+        result = await self._authed_request(
+            _SET_CGI, "port_port", self._form_body(fields)
+        )
+        if result.get("status") != "ok":
+            raise NetgearError(f"Port name set failed: {result}")
+        if name:
+            self._port_names[port] = name
+        else:
+            self._port_names.pop(port, None)
 
     async def async_logout(self) -> None:
         await super().async_logout()

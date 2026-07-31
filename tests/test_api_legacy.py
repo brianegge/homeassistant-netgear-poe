@@ -423,9 +423,7 @@ async def test_detect_api_http_redirect_to_prefixed_https() -> None:
 
 async def test_detect_api_https_url_uses_scheme() -> None:
     """The detected HTTPS flag makes the client build https:// URLs."""
-    session = _mock_multi_session(
-        [("https://h/", ""), (None, "<html>login</html>")]
-    )
+    session = _mock_multi_session([("https://h/", ""), (None, "<html>login</html>")])
     api = await async_detect_api("h", "pw", session=session)
     assert api._url("cgi", "cmd").startswith("https://h/")
 
@@ -731,3 +729,186 @@ async def test_wait_for_firmware_times_out_with_last_seen() -> None:
         await api._async_wait_for_firmware("6.0.1.30")
 
     assert api.async_get_info.await_count == _REBOOT_POLL_ATTEMPTS
+
+
+# A 4-port + 2-LAG xui switch, mirroring live office-switch responses: the
+# VLANList defs, the per-interface PVID view (the port/LAG universe), and a
+# members-only VLANMembershipList answer for VLANID=21.
+VLAN_LIST_XML = """<?xml version="1.0" encoding="UTF-8" ?>
+<ResponseData><DeviceConfiguration><version>1.0</version>
+<VLANList type="section">
+<VLAN><VLANID>1</VLANID><VLANName /></VLAN>
+<VLAN><VLANID>21</VLANID><VLANName>CCTV</VLANName></VLAN>
+</VLANList></DeviceConfiguration>
+<ActionStatus><requestURL>VLANList</requestURL><statusCode /></ActionStatus>
+</ResponseData>"""
+
+
+def _iface_list_xml(names: list[str]) -> str:
+    rows = "".join(
+        f"<Interface><interfaceName>{n}</interfaceName>"
+        f"<interfaceID>{i + 1}</interfaceID><PVID>1</PVID></Interface>"
+        for i, n in enumerate(names)
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8" ?><ResponseData>'
+        "<DeviceConfiguration><version>1.0</version>"
+        f'<VLANInterfaceList type="section">{rows}</VLANInterfaceList>'
+        "</DeviceConfiguration><ActionStatus><statusCode /></ActionStatus>"
+        "</ResponseData>"
+    )
+
+
+VLAN21_MEMBERS_XML = """<?xml version="1.0" encoding="UTF-8" ?>
+<ResponseData><DeviceConfiguration><version>1.0</version>
+<VLANMembershipList type="section">
+<VLAN><VLANID>21</VLANID><VLANName>CCTV</VLANName>
+<MembershipList>
+<VLANMember><interfaceName>g2</interfaceName><interfaceType>1</interfaceType>
+<interfaceID>2</interfaceID><membershipType>2</membershipType>
+<taggingMode>1</taggingMode></VLANMember>
+<VLANMember><interfaceName>g3</interfaceName><interfaceType>1</interfaceType>
+<interfaceID>3</interfaceID><membershipType>2</membershipType>
+<taggingMode>2</taggingMode></VLANMember>
+<VLANMember><interfaceName>LAG1</interfaceName><interfaceType>2</interfaceType>
+<interfaceID>1</interfaceID><membershipType>2</membershipType>
+<taggingMode>2</taggingMode></VLANMember>
+</MembershipList></VLAN>
+</VLANMembershipList></DeviceConfiguration>
+<ActionStatus><statusCode /></ActionStatus></ResponseData>"""
+
+
+def _vlan_request_fake(writes: list[str]):
+    """A _request fake answering the three VLAN reads and recording writes."""
+
+    async def fake(path: str, body: str | None = None):
+        if body is not None:
+            writes.append(body)
+            return _parse_xml(SET_OK_XML)
+        if path == "wcd?{VLANList}":
+            return _parse_xml(VLAN_LIST_XML)
+        if path == "wcd?{VLANInterfaceList&interfaceType=1}":
+            return _parse_xml(_iface_list_xml(["g1", "g2", "g3", "g4"]))
+        if path == "wcd?{VLANInterfaceList&interfaceType=2}":
+            return _parse_xml(_iface_list_xml(["LAG1", "LAG2"]))
+        if path == "wcd?{VLANMembershipList&VLANID=21}":
+            return _parse_xml(VLAN21_MEMBERS_XML)
+        raise AssertionError(path)
+
+    return fake
+
+
+async def test_get_vlan_membership() -> None:
+    """Members overlay the VLANInterfaceList universe; non-members are 0."""
+    api = NetgearLegacyApi("host", "pw")
+    api._request = AsyncMock(side_effect=_vlan_request_fake([]))
+
+    membership = await api.async_get_vlan_membership(21)
+
+    assert membership.name == "CCTV"
+    assert membership.ports == {1: 0, 2: 1, 3: 2, 4: 0}
+    assert membership.lags == {1: 2, 2: 0}
+    assert membership.vlans == [1, 21]
+
+
+async def test_get_vlan_membership_unknown_vid() -> None:
+    """A VID the switch's VLANList does not carry raises."""
+    api = NetgearLegacyApi("host", "pw")
+    api._request = AsyncMock(side_effect=_vlan_request_fake([]))
+
+    with pytest.raises(NetgearError, match="VLAN 99 is not configured"):
+        await api.async_get_vlan_membership(99)
+
+
+async def test_set_vlan_membership_diffs_into_set_and_delete() -> None:
+    """Only changes are posted: adds/updates as "set", removals as "delete"."""
+    api = NetgearLegacyApi("host", "pw")
+    writes: list[str] = []
+    api._request = AsyncMock(side_effect=_vlan_request_fake(writes))
+
+    membership = await api.async_get_vlan_membership(21)
+    membership.ports[3] = 0  # tagged -> not a member
+    membership.ports[4] = 2  # not a member -> tagged
+    await api.async_set_vlan_membership(membership)
+
+    assert len(writes) == 1
+    body = writes[0]
+    assert (
+        '<VLANMembershipList action="set" set="set">'
+        "<VLAN><VLANID>21</VLANID><MembershipList>"
+        "<VLANMember><interfaceName>g4</interfaceName><interfaceType>1"
+        "</interfaceType><membershipType>2</membershipType>"
+        "<taggingMode>2</taggingMode></VLANMember>"
+    ) in body
+    assert (
+        '<VLANMembershipList action="delete" set="set">'
+        "<VLAN><VLANID>21</VLANID><MembershipList>"
+        "<VLANMember><interfaceName>g3</interfaceName><interfaceType>1"
+        "</interfaceType></VLANMember>"
+    ) in body
+
+
+async def test_set_vlan_membership_no_change_skips_write() -> None:
+    """An identical map posts nothing."""
+    api = NetgearLegacyApi("host", "pw")
+    writes: list[str] = []
+    api._request = AsyncMock(side_effect=_vlan_request_fake(writes))
+
+    membership = await api.async_get_vlan_membership(21)
+    await api.async_set_vlan_membership(membership)
+
+    assert writes == []
+
+
+async def test_set_vlan_port_membership_verifies() -> None:
+    """The single-port helper re-reads and raises if the write vanished."""
+    api = NetgearLegacyApi("host", "pw")
+    # The fake always answers the same membership, so a change never sticks.
+    api._request = AsyncMock(side_effect=_vlan_request_fake([]))
+
+    with pytest.raises(NetgearError, match="did not stick"):
+        await api.async_set_vlan_port_membership(21, 3, 0)
+
+
+async def test_set_port_name_writes_description_and_powered_device() -> None:
+    """Renames post the port description; PoE ports also get poweredDevice."""
+    api = NetgearLegacyApi("host", "pw")
+    writes: list[str] = []
+
+    async def fake(path: str, body: str | None = None):
+        if body is not None:
+            writes.append(body)
+            return _parse_xml(SET_OK_XML)
+        assert path == "wcd?{PoEPSEInterfaceList}"
+        return _parse_xml(POE_LIST_XML)
+
+    api._request = AsyncMock(side_effect=fake)
+    await api.async_set_port_name(1, "garage-cam")
+
+    assert '<Standard802_3List action="set" set="set">' in writes[0]
+    assert (
+        "<Entry><interfaceName>g1</interfaceName><interfaceType>1"
+        "</interfaceType><interfaceID>1</interfaceID>"
+        "<interfaceDescription>garage-cam</interfaceDescription></Entry>"
+    ) in writes[0]
+    # Port 1 is in the PoE list, so the legacy PoE name is kept in step.
+    assert "<poweredDevice>garage-cam</poweredDevice>" in writes[1]
+
+
+async def test_set_port_name_non_poe_port() -> None:
+    """A port outside the PoE list still gets its description set."""
+    api = NetgearLegacyApi("host", "pw")
+    writes: list[str] = []
+
+    async def fake(path: str, body: str | None = None):
+        if body is not None:
+            writes.append(body)
+            return _parse_xml(SET_OK_XML)
+        return _parse_xml(POE_LIST_XML)  # ports 1-2 only
+
+    api._request = AsyncMock(side_effect=fake)
+    await api.async_set_port_name(16, "Storage Room 24")
+
+    assert len(writes) == 1
+    assert "<interfaceDescription>Storage Room 24</interfaceDescription>" in writes[0]
+    assert "<interfaceID>16</interfaceID>" in writes[0]

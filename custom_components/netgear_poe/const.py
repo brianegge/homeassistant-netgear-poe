@@ -22,6 +22,20 @@ TRAP_MODES: Final[list[str]] = [TRAP_MODE_LOCAL, TRAP_MODE_MQTT, TRAP_MODE_DISAB
 DEFAULT_TRAP_TOPIC: Final = "snmptrap2mqtt"
 
 SERVICE_SET_PORT_NAME: Final = "set_port_name"
+SERVICE_GET_VLAN_MEMBERSHIP: Final = "get_vlan_membership"
+SERVICE_SET_VLAN_MEMBERSHIP: Final = "set_vlan_membership"
+
+# HA-facing names for the api.py VLAN_* membership states (and read-only
+# "dynamic" for state 3, which writes map to "none" like the switch UI does).
+VLAN_MEMBERSHIP_NONE: Final = "none"
+VLAN_MEMBERSHIP_UNTAGGED: Final = "untagged"
+VLAN_MEMBERSHIP_TAGGED: Final = "tagged"
+VLAN_MEMBERSHIP_DYNAMIC: Final = "dynamic"
+VLAN_MEMBERSHIP_STATES: Final[list[str]] = [
+    VLAN_MEMBERSHIP_NONE,
+    VLAN_MEMBERSHIP_UNTAGGED,
+    VLAN_MEMBERSHIP_TAGGED,
+]
 
 SCAN_INTERVAL_SECONDS: Final = 30
 

@@ -107,8 +107,10 @@ band there — that pause is normal, not a hang.)
 `netgear_poe.set_port_name` sets a port's description on the switch,
 targeting the port's PoE switch entity. On JSON CGI and classic HTML models
 this is the port description (also visible as SNMP `ifAlias`); on legacy xui
-models it is the PoE "powered device" field. S350 EmWeb models don't support
-setting names over the web UI yet — SNMP `ifAlias` supplies their port names.
+models it sets the port description (`ifAlias`) on any port and keeps the
+PoE "powered device" field in step on PoE ports. S350 EmWeb models don't
+support setting names over the web UI yet — SNMP `ifAlias` supplies their
+port names.
 Entity names include the port description and are fixed at setup, so they
 pick up the new name after the integration is reloaded.
 
@@ -118,6 +120,27 @@ target:
   entity_id: switch.boiler_switch_port_3_poe
 data:
   name: driveway-cam
+```
+
+`netgear_poe.get_vlan_membership` reads a VLAN's 802.1Q membership map —
+which ports and LAGs carry it tagged, untagged, or not at all. Target any
+port entity of the switch; the response covers the whole VLAN, with
+`port_membership` holding the targeted port's own state.
+`netgear_poe.set_vlan_membership` changes the targeted port's membership in
+one VLAN, leaving every other port's membership and all PVIDs untouched
+(the write is a read-modify-write of the switch's full map, then re-read to
+verify it stuck). The VLAN must already exist on the switch. Both actions
+work on the JSON CGI generations (verified live on a GS728TPPv3) and on
+legacy xui models (verified live on a GS716-era switch); the classic
+`/base/` and S350 EmWeb generations answer with a "not supported" error.
+
+```yaml
+action: netgear_poe.set_vlan_membership
+target:
+  entity_id: switch.boiler_switch_port_24_poe
+data:
+  vlan: 21
+  membership: none
 ```
 
 ## Installation
