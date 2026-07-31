@@ -135,8 +135,11 @@ def _apply_vlan_member(
     1 = untagged, else tagged.
     """
     if_type = (member.findtext("interfaceType") or "").strip()
-    target = ports if if_type == "1" else lags if if_type == "2" else None
-    if target is None:
+    if if_type == "1":
+        target = ports
+    elif if_type == "2":
+        target = lags
+    else:
         return
     try:
         index = int(member.findtext("interfaceID", ""))
