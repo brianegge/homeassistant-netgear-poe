@@ -126,33 +126,49 @@ def _parse_xml(text: str) -> ET.Element:
         raise NetgearError(f"Could not parse switch XML: {err}") from err
 
 
+def _apply_vlan_member(
+    member: ET.Element, ports: dict[int, int], lags: dict[int, int]
+) -> None:
+    """Record one VLANMember's state into ports/lags; skip if unparseable.
+
+    interfaceType 1 = port, 2 = LAG (anything else ignored); taggingMode
+    1 = untagged, else tagged.
+    """
+    if_type = (member.findtext("interfaceType") or "").strip()
+    target = ports if if_type == "1" else lags if if_type == "2" else None
+    if target is None:
+        return
+    try:
+        index = int(member.findtext("interfaceID", ""))
+    except ValueError:
+        return
+    tagging = (member.findtext("taggingMode") or "").strip()
+    target[index] = VLAN_UNTAGGED if tagging == "1" else VLAN_TAGGED
+
+
+def _find_vlan(root: ET.Element, vid: int) -> ET.Element | None:
+    """The <VLAN> element for `vid` in a VLAN* section, or None."""
+    for vlan in root.iter("VLAN"):
+        if vlan.findtext("VLANID", "").strip() == str(vid):
+            return vlan
+    return None
+
+
 def _overlay_vlan_members(
     root: ET.Element, vid: int, ports: dict[int, int], lags: dict[int, int]
 ) -> str:
     """Overlay a VLANMembershipList's states onto the interface universe.
 
     Mutates `ports`/`lags` (keyed by 1-based index) and returns the VLAN
-    name. taggingMode 1 = untagged else tagged; interfaceType 1 = port,
-    2 = LAG, anything else skipped.
+    name. VLANMembershipList lists members only; non-members keep their
+    seeded VLAN_NOT_MEMBER.
     """
-    name = ""
-    for vlan in root.iter("VLAN"):
-        if vlan.findtext("VLANID", "").strip() != str(vid):
-            continue
-        name = (vlan.findtext("VLANName") or "").strip()
-        for member in vlan.iter("VLANMember"):
-            try:
-                index = int(member.findtext("interfaceID", ""))
-            except ValueError:
-                continue
-            tagging = (member.findtext("taggingMode") or "").strip()
-            state = VLAN_UNTAGGED if tagging == "1" else VLAN_TAGGED
-            if_type = (member.findtext("interfaceType") or "").strip()
-            if if_type == "1":
-                ports[index] = state
-            elif if_type == "2":
-                lags[index] = state
-    return name
+    vlan = _find_vlan(root, vid)
+    if vlan is None:
+        return ""
+    for member in vlan.iter("VLANMember"):
+        _apply_vlan_member(member, ports, lags)
+    return (vlan.findtext("VLANName") or "").strip()
 
 
 def _vlan_member_diff(
