@@ -14,39 +14,114 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
+      # The version bump this job pushes lands in custom_components/**, which
+      # would retrigger this workflow. One release per day breaks that loop and
+      # keeps a busy merge day from minting a tag per merge.
+      - name: Check for existing release today
+        id: daily_check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          today=$(date -u +%Y-%m-%d)
+          latest=$(gh api repos/${{ github.repository }}/releases/latest --jq .published_at 2>/dev/null || echo "")
+          if [[ "$latest" == "$today"* ]]; then
+            echo "Already released today ($latest), skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@v7
+        if: steps.daily_check.outputs.skip != 'true'
         with:
           fetch-depth: 0
 
       - name: Get current version
+        if: steps.daily_check.outputs.skip != 'true'
         id: current
         run: |
           version=$(jq -r .version custom_components/netgear_poe/manifest.json)
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
+      - name: Check if release already exists
+        if: steps.daily_check.outputs.skip != 'true'
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "v${{ steps.current.outputs.version }}" > /dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Bump patch version
+        if: steps.daily_check.outputs.skip != 'true'
         id: bump
         run: |
           IFS='.' read -r major minor patch <<< "${{ steps.current.outputs.version }}"
           new_version="${major}.${minor}.$((patch + 1))"
           echo "version=$new_version" >> "$GITHUB_OUTPUT"
 
-      - name: Update manifest for release zip
+      # Ship the manifest version as-is when it has no tag yet, so a hand-made
+      # minor/major bump releases under its own number; otherwise take the next
+      # patch.
+      - name: Determine release version
+        if: steps.daily_check.outputs.skip != 'true'
+        id: version
         run: |
-          jq --arg v "${{ steps.bump.outputs.version }}" '.version = $v' \
-            custom_components/netgear_poe/manifest.json > tmp.json
-          mv tmp.json custom_components/netgear_poe/manifest.json
+          if [ "${{ steps.check.outputs.exists }}" = "true" ]; then
+            echo "version=${{ steps.bump.outputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${{ steps.current.outputs.version }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Reusing a tag silently rewrites an already-published release (it moves
+      # the tag and replaces the asset), so refuse instead of overwriting.
+      - name: Fail if the release version is already published
+        if: steps.daily_check.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "v${{ steps.version.outputs.version }}" > /dev/null 2>&1; then
+            echo "::error::v${{ steps.version.outputs.version }} is already published; bump the version in custom_components/netgear_poe/manifest.json"
+            exit 1
+          fi
+
+      # Rewrite just the version line: `jq` would reformat the whole manifest
+      # (it expands the single-element arrays onto their own lines).
+      - name: Update manifest version
+        if: steps.daily_check.outputs.skip != 'true' && steps.version.outputs.version != steps.current.outputs.version
+        run: |
+          manifest=custom_components/netgear_poe/manifest.json
+          sed -i -E 's/("version": ")[^"]+(")/\1${{ steps.version.outputs.version }}\2/' "$manifest"
+          jq -e --arg v "${{ steps.version.outputs.version }}" '.version == $v' "$manifest" > /dev/null
+
+      # Committing the bump back to main is what keeps the manifest in step with
+      # the published tags; without it every run recomputes the same "next"
+      # version and overwrites the previous release.
+      - name: Commit version bump
+        if: steps.daily_check.outputs.skip != 'true' && steps.version.outputs.version != steps.current.outputs.version
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add custom_components/netgear_poe/manifest.json
+          git diff --cached --quiet && exit 0
+          git commit -m "Bump version to ${{ steps.version.outputs.version }}"
+          git push
 
       - name: Create release zip
+        if: steps.daily_check.outputs.skip != 'true'
         run: |
           cd custom_components/netgear_poe
           zip -r ../../netgear-poe.zip .
 
       - name: Create GitHub Release
+        if: steps.daily_check.outputs.skip != 'true'
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: "v${{ steps.bump.outputs.version }}"
-          name: "v${{ steps.bump.outputs.version }}"
+          tag_name: "v${{ steps.version.outputs.version }}"
+          name: "v${{ steps.version.outputs.version }}"
           files: netgear-poe.zip
           generate_release_notes: true
           target_commitish: ${{ github.sha }}
