@@ -536,11 +536,10 @@ async def test_set_vlan_membership_error_status() -> None:
 
     api = NetgearPoeApi("host", "pw")
     api._authed_request = AsyncMock(return_value={"status": "error"})
+    membership = VlanMembership(vid=21, name="", ports={1: 0}, lags={})
 
     with pytest.raises(NetgearError, match="VLAN membership set failed"):
-        await api.async_set_vlan_membership(
-            VlanMembership(vid=21, name="", ports={1: 0}, lags={})
-        )
+        await api.async_set_vlan_membership(membership)
 
 
 async def test_set_vlan_port_membership_verifies_write() -> None:

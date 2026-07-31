@@ -126,6 +126,82 @@ def _parse_xml(text: str) -> ET.Element:
         raise NetgearError(f"Could not parse switch XML: {err}") from err
 
 
+def _overlay_vlan_members(
+    root: ET.Element, vid: int, ports: dict[int, int], lags: dict[int, int]
+) -> str:
+    """Overlay a VLANMembershipList's states onto the interface universe.
+
+    Mutates `ports`/`lags` (keyed by 1-based index) and returns the VLAN
+    name. taggingMode 1 = untagged else tagged; interfaceType 1 = port,
+    2 = LAG, anything else skipped.
+    """
+    name = ""
+    for vlan in root.iter("VLAN"):
+        if vlan.findtext("VLANID", "").strip() != str(vid):
+            continue
+        name = (vlan.findtext("VLANName") or "").strip()
+        for member in vlan.iter("VLANMember"):
+            try:
+                index = int(member.findtext("interfaceID", ""))
+            except ValueError:
+                continue
+            tagging = (member.findtext("taggingMode") or "").strip()
+            state = VLAN_UNTAGGED if tagging == "1" else VLAN_TAGGED
+            if_type = (member.findtext("interfaceType") or "").strip()
+            if if_type == "1":
+                ports[index] = state
+            elif if_type == "2":
+                lags[index] = state
+    return name
+
+
+def _vlan_member_diff(
+    if_type: int, desired: dict[int, int], existing: dict[int, int]
+) -> tuple[list[str], list[str]]:
+    """Return (set, delete) VLANMember XML fragments for one interface type.
+
+    Only interfaces whose desired state differs from `existing` are emitted;
+    state 3 (dynamic) is normalized to "not a member" like the vendor UI.
+    """
+    sets: list[str] = []
+    deletes: list[str] = []
+    for index, raw_state in sorted(desired.items()):
+        state = VLAN_NOT_MEMBER if raw_state == 3 else raw_state
+        if state == existing.get(index, VLAN_NOT_MEMBER):
+            continue
+        if_name = f"g{index}" if if_type == 1 else f"LAG{index}"
+        entry = (
+            f"<VLANMember><interfaceName>{if_name}</interfaceName>"
+            f"<interfaceType>{if_type}</interfaceType>"
+        )
+        if state == VLAN_NOT_MEMBER:
+            deletes.append(entry + "</VLANMember>")
+        else:
+            sets.append(
+                entry
+                + "<membershipType>2</membershipType>"
+                + f"<taggingMode>{state}</taggingMode></VLANMember>"
+            )
+    return sets, deletes
+
+
+def _vlan_membership_body(vid: int, sets: list[str], deletes: list[str]) -> str:
+    """Build the DeviceConfiguration body for a VLAN membership write."""
+    sections = ""
+    for action, entries in (("set", sets), ("delete", deletes)):
+        if entries:
+            sections += (
+                f'<VLANMembershipList action="{action}" set="set">'
+                f"<VLAN><VLANID>{vid}</VLANID>"
+                f"<MembershipList>{''.join(entries)}</MembershipList>"
+                "</VLAN></VLANMembershipList>"
+            )
+    return (
+        "<?xml version='1.0' encoding='utf-8'?>"
+        f'<DeviceConfiguration set="set">{sections}</DeviceConfiguration>'
+    )
+
+
 class NetgearLegacyApi:
     """Async PoE client for the legacy xui web UI. Mirrors NetgearPoeApi."""
 
@@ -396,18 +472,34 @@ class NetgearLegacyApi:
         every interface) and non-members fill in as state 0. taggingMode
         1 = untagged, 2 = tagged; interfaceType 1 = port, 2 = LAG.
         """
-        root = await self._request("wcd?{VLANList}")
-        vlans = sorted(
-            int(v.findtext("VLANID", "0") or 0)
-            for v in root.iter("VLAN")
-            if v.findtext("VLANID")
-        )
+        vlans = await self._read_configured_vlan_ids()
         if vid not in vlans:
             raise NetgearError(
                 f"VLAN {vid} is not configured on {self.host} "
                 f"(configured: {vlans or 'unknown'})"
             )
+        ports, lags = await self._read_vlan_interface_universe()
+        root = await self._request(f"wcd?{{VLANMembershipList&VLANID={vid}}}")
+        name = _overlay_vlan_members(root, vid, ports, lags)
+        return VlanMembership(vid=vid, name=name, ports=ports, lags=lags, vlans=vlans)
 
+    async def _read_configured_vlan_ids(self) -> list[int]:
+        """Sorted list of VLAN IDs configured on the switch (from VLANList)."""
+        root = await self._request("wcd?{VLANList}")
+        return sorted(
+            int(v.findtext("VLANID", "0") or 0)
+            for v in root.iter("VLAN")
+            if v.findtext("VLANID")
+        )
+
+    async def _read_vlan_interface_universe(
+        self,
+    ) -> tuple[dict[int, int], dict[int, int]]:
+        """Every port and LAG index, each seeded to VLAN_NOT_MEMBER.
+
+        VLANMembershipList lists only members, so the full universe comes
+        from VLANInterfaceList (the PVID view, which carries every interface).
+        """
         ports: dict[int, int] = {}
         lags: dict[int, int] = {}
         for if_type, target in ((1, ports), (2, lags)):
@@ -419,28 +511,7 @@ class NetgearLegacyApi:
                     target[int(iface.findtext("interfaceID", ""))] = VLAN_NOT_MEMBER
                 except ValueError:
                     continue
-
-        root = await self._request(f"wcd?{{VLANMembershipList&VLANID={vid}}}")
-        name = ""
-        for vlan in root.iter("VLAN"):
-            if vlan.findtext("VLANID", "").strip() != str(vid):
-                continue
-            name = (vlan.findtext("VLANName") or "").strip()
-            for member in vlan.iter("VLANMember"):
-                try:
-                    index = int(member.findtext("interfaceID", ""))
-                except ValueError:
-                    continue
-                tagging = (member.findtext("taggingMode") or "").strip()
-                state = VLAN_UNTAGGED if tagging == "1" else VLAN_TAGGED
-                if_type = (member.findtext("interfaceType") or "").strip()
-                if if_type == "1":
-                    ports[index] = state
-                elif if_type == "2":
-                    lags[index] = state
-                # Any other/blank interfaceType is neither a port nor a LAG;
-                # skip it rather than misfiling it under lags.
-        return VlanMembership(vid=vid, name=name, ports=ports, lags=lags, vlans=vlans)
+        return ports, lags
 
     async def async_set_vlan_membership(self, membership: VlanMembership) -> None:
         """Write a VLAN's port/LAG membership map.
@@ -460,38 +531,12 @@ class NetgearLegacyApi:
             (1, membership.ports, current.ports),
             (2, membership.lags, current.lags),
         ):
-            for index, state in sorted(desired.items()):
-                state = VLAN_NOT_MEMBER if state == 3 else state
-                if state == existing.get(index, VLAN_NOT_MEMBER):
-                    continue
-                if_name = f"g{index}" if if_type == 1 else f"LAG{index}"
-                entry = (
-                    f"<VLANMember><interfaceName>{if_name}</interfaceName>"
-                    f"<interfaceType>{if_type}</interfaceType>"
-                )
-                if state == VLAN_NOT_MEMBER:
-                    deletes.append(entry + "</VLANMember>")
-                else:
-                    sets.append(
-                        entry
-                        + "<membershipType>2</membershipType>"
-                        + f"<taggingMode>{state}</taggingMode></VLANMember>"
-                    )
+            type_sets, type_deletes = _vlan_member_diff(if_type, desired, existing)
+            sets += type_sets
+            deletes += type_deletes
         if not sets and not deletes:
             return
-        sections = ""
-        for action, entries in (("set", sets), ("delete", deletes)):
-            if entries:
-                sections += (
-                    f'<VLANMembershipList action="{action}" set="set">'
-                    f"<VLAN><VLANID>{membership.vid}</VLANID>"
-                    f"<MembershipList>{''.join(entries)}</MembershipList>"
-                    "</VLAN></VLANMembershipList>"
-                )
-        body = (
-            "<?xml version='1.0' encoding='utf-8'?>"
-            f'<DeviceConfiguration set="set">{sections}</DeviceConfiguration>'
-        )
+        body = _vlan_membership_body(membership.vid, sets, deletes)
         await self._wcd_set(body, "VLAN membership set failed")
 
     async def async_set_vlan_port_membership(
