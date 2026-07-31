@@ -23,7 +23,7 @@ import re
 import secrets
 import time
 from base64 import b64decode, b64encode
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from hashlib import md5
 from typing import Any, Final
@@ -180,6 +180,36 @@ class VlanMembership:
     ports: dict[int, int]
     lags: dict[int, int]
     vlans: list[int] = field(default_factory=list)
+
+
+async def apply_vlan_port_change(
+    get_membership: Callable[[int], Awaitable[VlanMembership]],
+    set_membership: Callable[[VlanMembership], Awaitable[None]],
+    lock: asyncio.Lock,
+    vid: int,
+    port: int,
+    state: int,
+) -> VlanMembership:
+    """Change one port's VLAN membership, preserving every other port.
+
+    Shared by the JSON and legacy clients: read the map, change the one
+    port, write the whole map back, then re-read to verify — all under
+    `lock` so concurrent single-port changes can't each start from the same
+    map and clobber one another. Returns the re-read membership.
+    """
+    async with lock:
+        membership = await get_membership(vid)
+        if port not in membership.ports:
+            raise NetgearError(f"Port {port} not found in VLAN membership")
+        membership.ports[port] = state
+        await set_membership(membership)
+        after = await get_membership(vid)
+    if after.ports.get(port) != state:
+        raise NetgearError(
+            f"VLAN {vid} membership of port {port} did not stick "
+            f"(wanted {state}, switch reports {after.ports.get(port)})"
+        )
+    return after
 
 
 @dataclass
@@ -628,19 +658,14 @@ class NetgearPoeApi:
         verify the write landed. The read-modify-write is held under a lock
         so concurrent single-port changes don't clobber each other.
         """
-        async with self._vlan_lock:
-            membership = await self.async_get_vlan_membership(vid)
-            if port not in membership.ports:
-                raise NetgearError(f"Port {port} not found in VLAN membership")
-            membership.ports[port] = state
-            await self.async_set_vlan_membership(membership)
-            after = await self.async_get_vlan_membership(vid)
-        if after.ports.get(port) != state:
-            raise NetgearError(
-                f"VLAN {vid} membership of port {port} did not stick "
-                f"(wanted {state}, switch reports {after.ports.get(port)})"
-            )
-        return after
+        return await apply_vlan_port_change(
+            self.async_get_vlan_membership,
+            self.async_set_vlan_membership,
+            self._vlan_lock,
+            vid,
+            port,
+            state,
+        )
 
     async def async_ensure_trap_destination(self, dest_ip: str, community: str) -> None:
         """Register an enabled v2c trap destination on the switch.

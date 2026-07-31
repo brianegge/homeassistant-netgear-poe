@@ -47,6 +47,7 @@ from .api import (
     SwitchInfo,
     VlanMembership,
     _insecure_connector,
+    apply_vlan_port_change,
 )
 from .api_base_ui import NetgearBaseUiApi, NetgearCheetahApi
 from .api_json_v2 import NetgearJsonV2Api
@@ -330,6 +331,14 @@ class NetgearLegacyApi:
             raise NetgearError(f"Port {port} not found")
         return self._if_names[port]
 
+    async def _wcd_set(self, body: str, what: str) -> None:
+        """POST a wcd set body and raise if the switch reports an error."""
+        root = await self._request("wcd", body=body)
+        code = root.findtext(".//ActionStatus/statusCode", "").strip()
+        if code not in ("", "0"):
+            status = root.findtext(".//ActionStatus/statusString", "").strip()
+            raise NetgearError(f"{what}: {status or code}")
+
     async def _async_set_interface(self, port: int, elements: str) -> None:
         """Post a PoEPSEInterfaceList set for one port and check the status."""
         if_name = await self._async_if_name(port)
@@ -341,11 +350,7 @@ class NetgearLegacyApi:
             f"{elements}</Interface>"
             "</PoEPSEInterfaceList></DeviceConfiguration>"
         )
-        root = await self._request("wcd", body=body)
-        code = root.findtext(".//ActionStatus/statusCode", "").strip()
-        if code not in ("", "0"):
-            status = root.findtext(".//ActionStatus/statusString", "").strip()
-            raise NetgearError(f"PoE set failed: {status or code}")
+        await self._wcd_set(body, "PoE set failed")
 
     async def async_set_port_enabled(self, port: int, enabled: bool) -> None:
         """Enable or disable PoE on a port."""
@@ -374,11 +379,7 @@ class NetgearLegacyApi:
             f"<interfaceDescription>{escape(name)}</interfaceDescription>"
             "</Entry></Standard802_3List></DeviceConfiguration>"
         )
-        root = await self._request("wcd", body=body)
-        code = root.findtext(".//ActionStatus/statusCode", "").strip()
-        if code not in ("", "0"):
-            status = root.findtext(".//ActionStatus/statusString", "").strip()
-            raise NetgearError(f"Port name set failed: {status or code}")
+        await self._wcd_set(body, "Port name set failed")
         # A non-PoE port has no poweredDevice; the description write above
         # is the whole job there.
         with contextlib.suppress(NetgearError):
@@ -491,11 +492,7 @@ class NetgearLegacyApi:
             "<?xml version='1.0' encoding='utf-8'?>"
             f'<DeviceConfiguration set="set">{sections}</DeviceConfiguration>'
         )
-        root = await self._request("wcd", body=body)
-        code = root.findtext(".//ActionStatus/statusCode", "").strip()
-        if code not in ("", "0"):
-            status = root.findtext(".//ActionStatus/statusString", "").strip()
-            raise NetgearError(f"VLAN membership set failed: {status or code}")
+        await self._wcd_set(body, "VLAN membership set failed")
 
     async def async_set_vlan_port_membership(
         self, vid: int, port: int, state: int
@@ -506,19 +503,14 @@ class NetgearLegacyApi:
         verify the write landed. The read-modify-write is held under a lock
         so concurrent single-port changes don't clobber each other.
         """
-        async with self._vlan_lock:
-            membership = await self.async_get_vlan_membership(vid)
-            if port not in membership.ports:
-                raise NetgearError(f"Port {port} not found in VLAN membership")
-            membership.ports[port] = state
-            await self.async_set_vlan_membership(membership)
-            after = await self.async_get_vlan_membership(vid)
-        if after.ports.get(port) != state:
-            raise NetgearError(
-                f"VLAN {vid} membership of port {port} did not stick "
-                f"(wanted {state}, switch reports {after.ports.get(port)})"
-            )
-        return after
+        return await apply_vlan_port_change(
+            self.async_get_vlan_membership,
+            self.async_set_vlan_membership,
+            self._vlan_lock,
+            vid,
+            port,
+            state,
+        )
 
     async def async_power_cycle_port(self, port: int) -> None:
         """Power cycle a port; the legacy UI has no native PoE reset."""
