@@ -48,7 +48,7 @@ async def test_switch_turn_off(
     mock_api: MagicMock,
     mock_config_entry: MockConfigEntry,
 ) -> None:
-    """Test turning PoE off sends the SNMP set."""
+    """Test turning PoE off writes through to the switch's web API."""
     await setup_integration(hass, mock_config_entry)
 
     await hass.services.async_call(
@@ -65,7 +65,7 @@ async def test_switch_turn_on(
     mock_api: MagicMock,
     mock_config_entry: MockConfigEntry,
 ) -> None:
-    """Test turning PoE on sends the SNMP set."""
+    """Test turning PoE on writes through to the switch's web API."""
     await setup_integration(hass, mock_config_entry)
 
     await hass.services.async_call(
@@ -117,7 +117,7 @@ async def test_switch_set_failure(
     mock_api: MagicMock,
     mock_config_entry: MockConfigEntry,
 ) -> None:
-    """Test SNMP set failure raises a HomeAssistantError."""
+    """Test a failed write to the switch raises a HomeAssistantError."""
     await setup_integration(hass, mock_config_entry)
     mock_api.async_set_port_enabled.side_effect = NetgearError("noAccess")
 
@@ -226,3 +226,78 @@ async def test_vlan_membership_unsupported_backend(
             blocking=True,
         )
     mock_api.async_set_vlan_port_membership.assert_not_awaited()
+
+
+async def test_web_port_names_survive_a_dead_snmp_agent(
+    hass: HomeAssistant,
+    mock_api: MagicMock,
+    mock_link_monitor: MagicMock,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """A wedged SNMP agent must not cost the ports their web-CGI names.
+
+    The agent on this firmware hangs and answers nothing; ifAlias is then
+    empty, so the names the API already read over the web UI have to stand.
+    """
+    mock_link_monitor.async_get_port_info.return_value = ({}, {})
+    await setup_integration(hass, mock_config_entry)
+
+    # The web CGI fetch stays enabled, so the alias is still there to fall
+    # back on rather than being suppressed in favor of a source that is down.
+    assert mock_api.web_port_names_enabled is True
+    state = hass.states.get(PORT_1_ENTITY)
+    assert state is not None
+    assert (
+        state.attributes["friendly_name"] == "boiler-switch Port 1 (driveway cam) PoE"
+    )
+
+
+async def test_port_name_follows_a_rename_without_a_reload(
+    hass: HomeAssistant,
+    mock_api: MagicMock,
+    mock_link_monitor: MagicMock,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """Names are rebuilt per state write, so a later alias is picked up."""
+    mock_link_monitor.async_get_port_info.return_value = ({}, {})
+    await setup_integration(hass, mock_config_entry)
+
+    # SNMP comes back (or the port is renamed) and reports a new ifAlias.
+    mock_link_monitor.async_get_port_info.return_value = ({1: True}, {1: "boiler pump"})
+    await mock_config_entry.runtime_data.coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    state = hass.states.get(PORT_1_ENTITY)
+    assert state is not None
+    assert state.attributes["friendly_name"] == "boiler-switch Port 1 (boiler pump) PoE"
+    # The entity_id was generated at first add and must not move under the user.
+    assert hass.states.get("switch.boiler_switch_port_1_boiler_pump_poe") is None
+
+
+async def test_web_name_fetch_yields_to_snmp_and_returns_when_it_dies(
+    hass: HomeAssistant,
+    mock_api: MagicMock,
+    mock_link_monitor: MagicMock,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """The CGI name page is only read while SNMP is not supplying names."""
+    await setup_integration(hass, mock_config_entry)
+
+    # SNMP answered with ifAlias names, so the duplicate CGI read is off.
+    assert mock_api.web_port_names_enabled is False
+
+    # Agent wedges: the CGI becomes the name source again.
+    mock_link_monitor.async_get_port_info.return_value = ({}, {})
+    coordinator = mock_config_entry.runtime_data.coordinator
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    assert mock_api.web_port_names_enabled is True
+
+    # And it yields again once SNMP recovers.
+    mock_link_monitor.async_get_port_info.return_value = (
+        {1: True},
+        {1: "driveway cam"},
+    )
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    assert mock_api.web_port_names_enabled is False

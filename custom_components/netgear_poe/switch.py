@@ -97,6 +97,7 @@ class NetgearPoePortSwitch(NetgearPoePortEntity, SwitchEntity):
     """Switch to enable/disable PoE power on a port."""
 
     _attr_device_class = SwitchDeviceClass.OUTLET
+    _name_suffix = "PoE"
 
     def __init__(
         self,
@@ -107,7 +108,6 @@ class NetgearPoePortSwitch(NetgearPoePortEntity, SwitchEntity):
         """Initialize."""
         super().__init__(coordinator, entry, port)
         self._attr_unique_id = f"{entry.entry_id}_poe_port_{port}"
-        self._attr_name = f"{self._port_label()} PoE"
 
     @property
     def is_on(self) -> bool | None:
@@ -139,8 +139,9 @@ class NetgearPoePortSwitch(NetgearPoePortEntity, SwitchEntity):
     async def async_set_port_name(self, name: str) -> None:
         """Set the port's description on the switch (set_port_name action).
 
-        Entity names include the description and are fixed at setup, so
-        they reflect the new name after the integration is reloaded.
+        Entity names include the description and are rebuilt on each state
+        write, so they follow the rename from the next poll. The entity_id
+        was generated when the entity was first added and does not change.
         """
         try:
             await self.coordinator.api.async_set_port_name(self._port, name)

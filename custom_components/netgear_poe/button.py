@@ -74,6 +74,7 @@ class NetgearPoePowerCycleButton(NetgearPoePortEntity, ButtonEntity):
     """Button that power cycles a PoE port via the switch's native reset."""
 
     _attr_icon = "mdi:restart"
+    _name_suffix = "power cycle"
 
     def __init__(
         self,
@@ -84,7 +85,6 @@ class NetgearPoePowerCycleButton(NetgearPoePortEntity, ButtonEntity):
         """Initialize."""
         super().__init__(coordinator, entry, port)
         self._attr_unique_id = f"{entry.entry_id}_poe_port_{port}_power_cycle"
-        self._attr_name = f"{self._port_label()} power cycle"
 
     async def async_press(self) -> None:
         """Power cycle the port."""

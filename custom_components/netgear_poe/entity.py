@@ -34,7 +34,16 @@ class NetgearPoeEntity(CoordinatorEntity[NetgearPoeCoordinator]):
 
 
 class NetgearPoePortEntity(NetgearPoeEntity):
-    """Base class for per-port entities."""
+    """Base class for per-port entities.
+
+    Subclasses set `_name_suffix` ("PoE", "link", ...) instead of a fixed
+    `_attr_name`: the name is built on every state write so a port that is
+    renamed on the switch — or whose name arrives late, after a wedged SNMP
+    agent recovers — picks the new label up on the next poll. The entity_id
+    is still generated from the name at first add and never changes.
+    """
+
+    _name_suffix = ""
 
     def __init__(
         self,
@@ -55,6 +64,11 @@ class NetgearPoePortEntity(NetgearPoeEntity):
     def available(self) -> bool:
         """Return True if the port is present in the last update."""
         return super().available and self.port_data is not None
+
+    @property
+    def name(self) -> str:
+        """Return the port label plus this entity's suffix."""
+        return f"{self._port_label()} {self._name_suffix}".strip()
 
     def _port_label(self) -> str:
         """Return a friendly label like 'Port 3 (camera)'."""

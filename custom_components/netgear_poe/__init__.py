@@ -150,13 +150,23 @@ class NetgearPoeCoordinator(DataUpdateCoordinator[PoeData]):
 
     async def _apply_link_info(self, data: PoeData) -> None:
         """Overlay SNMP link state and ifAlias names onto the PoE data."""
-        if self.link_monitor is not None:
-            data.link, names = await self.link_monitor.async_get_port_info()
-            # SNMP ifAlias is the same source LibreNMS uses and needs no web
-            # login, so prefer it for port names when available.
-            for port, name in names.items():
-                if port in data.ports:
-                    data.ports[port].alias = name
+        if self.link_monitor is None:
+            return
+        data.link, names = await self.link_monitor.async_get_port_info()
+        # SNMP ifAlias is the same source LibreNMS uses and needs no web
+        # login, so prefer it for port names when available. A hung agent
+        # returns no names at all, which leaves each port on the web CGI
+        # name the API already set rather than blanking it.
+        for port, name in names.items():
+            if port in data.ports:
+                data.ports[port].alias = name
+        # Stop re-reading the web UI's name page for as long as SNMP keeps
+        # answering with names, and put it back the moment SNMP goes quiet.
+        # This lags a poll behind — the API has already fetched by the time we
+        # get here — which is what makes the switchover free: the names the
+        # first poll read stay cached on the API and keep feeding the aliases,
+        # so the fallback is in place before it is ever needed.
+        self.api.web_port_names_enabled = not names
 
     @callback
     def apply_link_trap(self, port: int, up: bool) -> None:
@@ -401,8 +411,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: NetgearPoeConfigEntry) -
     link_monitor = (
         SnmpLinkMonitor(entry.data[CONF_HOST], community) if community else None
     )
-    # With SNMP present, take port names from ifAlias instead of the web CGI.
-    api.web_port_names_enabled = link_monitor is None
+    # Port names come from the web CGI on the first poll, after which SNMP
+    # ifAlias takes over and the coordinator switches the CGI fetch back off
+    # (see _apply_link_info). Disabling it up front, merely because a
+    # community was configured, left the ports nameless for as long as the
+    # SNMP agent stayed wedged — a known failure mode of this firmware.
 
     coordinator = NetgearPoeCoordinator(hass, api, link_monitor)
     await coordinator.async_config_entry_first_refresh()
