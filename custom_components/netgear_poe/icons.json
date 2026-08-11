@@ -20,6 +20,9 @@
     },
     "set_vlan_membership": {
       "service": "mdi:lan-pending"
+    },
+    "set_port_speed": {
+      "service": "mdi:speedometer"
     }
   }
 }

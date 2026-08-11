@@ -95,6 +95,12 @@
     },
     "vlan_membership_not_supported": {
       "message": "The switch at {host} does not support VLAN membership over its web UI generation"
+    },
+    "set_port_speed_failed": {
+      "message": "Failed to set the link speed of port {port} of {host}: {error}"
+    },
+    "port_speed_not_supported": {
+      "message": "The switch at {host} does not support port speed control over its web UI generation"
     }
   },
   "entity": {
@@ -146,6 +152,28 @@
         "membership": {
           "name": "Membership",
           "description": "Whether the port carries the VLAN tagged, untagged, or not at all."
+        }
+      }
+    },
+    "set_port_speed": {
+      "name": "Set port speed",
+      "description": "Sets the targeted port's link speed and duplex. With autonegotiation on, a specific speed restricts what the port advertises and the link partner follows; with it off, the values are forced.",
+      "fields": {
+        "speed": {
+          "name": "Speed",
+          "description": "Link speed, or auto for full autonegotiation."
+        },
+        "duplex": {
+          "name": "Duplex",
+          "description": "Duplex mode. 1000M requires full."
+        },
+        "autoneg": {
+          "name": "Autonegotiation",
+          "description": "Keep autonegotiation enabled (recommended). Off requires an explicit speed and duplex."
+        },
+        "port": {
+          "name": "Port",
+          "description": "Switch port to configure instead of the targeted entity's own port. Use this to reach ports without entities, such as SFP uplinks."
         }
       }
     }

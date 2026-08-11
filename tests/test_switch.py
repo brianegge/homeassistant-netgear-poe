@@ -14,6 +14,7 @@ from custom_components.netgear_poe.const import (
     DOMAIN,
     SERVICE_GET_VLAN_MEMBERSHIP,
     SERVICE_SET_PORT_NAME,
+    SERVICE_SET_PORT_SPEED,
     SERVICE_SET_VLAN_MEMBERSHIP,
 )
 
@@ -108,6 +109,77 @@ async def test_set_port_name_failure(
             DOMAIN,
             SERVICE_SET_PORT_NAME,
             {"entity_id": PORT_1_ENTITY, "name": "garage-cam"},
+            blocking=True,
+        )
+
+
+async def test_set_port_speed(
+    hass: HomeAssistant,
+    mock_api: MagicMock,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """The set_port_speed action strips the M suffix and applies defaults."""
+    await setup_integration(hass, mock_config_entry)
+
+    await hass.services.async_call(
+        DOMAIN,
+        SERVICE_SET_PORT_SPEED,
+        {"entity_id": PORT_1_ENTITY, "speed": "100M", "duplex": "full"},
+        blocking=True,
+    )
+    mock_api.async_set_port_speed.assert_awaited_with(1, "100", "full", True)
+
+    await hass.services.async_call(
+        DOMAIN,
+        SERVICE_SET_PORT_SPEED,
+        {"entity_id": PORT_2_ENTITY, "speed": "auto"},
+        blocking=True,
+    )
+    mock_api.async_set_port_speed.assert_awaited_with(2, "auto", "auto", True)
+
+    # The port override reaches ports without entities (SFP uplinks).
+    await hass.services.async_call(
+        DOMAIN,
+        SERVICE_SET_PORT_SPEED,
+        {"entity_id": PORT_1_ENTITY, "speed": "100M", "duplex": "full", "port": 9},
+        blocking=True,
+    )
+    mock_api.async_set_port_speed.assert_awaited_with(9, "100", "full", True)
+
+
+async def test_set_port_speed_unsupported_backend(
+    hass: HomeAssistant,
+    mock_api: MagicMock,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """Backends without speed control answer with a clear error."""
+    mock_api.supports_port_speed = False
+    await setup_integration(hass, mock_config_entry)
+
+    with pytest.raises(HomeAssistantError):
+        await hass.services.async_call(
+            DOMAIN,
+            SERVICE_SET_PORT_SPEED,
+            {"entity_id": PORT_1_ENTITY, "speed": "100M"},
+            blocking=True,
+        )
+    mock_api.async_set_port_speed.assert_not_awaited()
+
+
+async def test_set_port_speed_failure(
+    hass: HomeAssistant,
+    mock_api: MagicMock,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """A switch error surfaces as a HomeAssistantError."""
+    await setup_integration(hass, mock_config_entry)
+    mock_api.async_set_port_speed.side_effect = NetgearError("denied")
+
+    with pytest.raises(HomeAssistantError):
+        await hass.services.async_call(
+            DOMAIN,
+            SERVICE_SET_PORT_SPEED,
+            {"entity_id": PORT_1_ENTITY, "speed": "100M", "duplex": "full"},
             blocking=True,
         )
 

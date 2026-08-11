@@ -310,6 +310,124 @@ async def test_set_port_name_uses_aj4_wire_format() -> None:
     assert api._port_names[26] == "Storage Room 24"
 
 
+def _port_speed_row(**overrides: object) -> dict:
+    row = {
+        "descp": "uplink",
+        "admin": 1,
+        "autoNego": 1,
+        "speed": "Auto",
+        "duplex": 2,
+        "flowCtrl": 0,
+        "trap": 1,
+        "ifindex": 9,
+    }
+    row.update(overrides)
+    return row
+
+
+async def test_set_port_speed_advertises_one_rate() -> None:
+    """Pinning 100/full keeps autoNego on and posts the aj4 row fields.
+
+    The re-read after the write must report the new configuration or the
+    call fails — the switch's fiber-port speed rule lives in client-side
+    JS, so a silently ignored write is only caught here.
+    """
+    from unittest.mock import AsyncMock
+
+    api = NetgearJsonV2Api("host", "pw")
+    api._xsrf = "tok1"
+    calls: list[tuple[str, str, str | None]] = []
+
+    async def fake_request(
+        cgi: str, cmd: str, body: str | None = None, params: dict | None = None
+    ) -> dict:
+        calls.append((cgi, cmd, body))
+        if cgi == "get.cgi":
+            assert cmd == "port_port"
+            if len(calls) == 1:
+                return {"data": {"ports": [_port_speed_row()]}}
+            return {"data": {"ports": [_port_speed_row(speed="100", duplex=1)]}}
+        return {"status": "ok"}
+
+    api._authed_request = AsyncMock(side_effect=fake_request)
+    await api.async_set_port_speed(9, "100", "full")
+
+    cgi, cmd, body = calls[1]
+    assert (cgi, cmd) == ("set.cgi", "port_port")
+    assert body == (
+        '{"_ds=1&descp=uplink&trap=1&admin=1&autoNego=1'
+        '&speed=100&duplex=1&flowCtrl=0&selEntry=8&xsrf=tok1&_de=1":{}}'
+    )
+
+
+async def test_set_port_speed_detects_ignored_write() -> None:
+    """A write the firmware accepts but ignores fails the read-back check."""
+    from unittest.mock import AsyncMock
+
+    api = NetgearJsonV2Api("host", "pw")
+    api._authed_request = AsyncMock(
+        side_effect=[
+            {"data": {"ports": [_port_speed_row()]}},
+            {"status": "ok"},
+            {"data": {"ports": [_port_speed_row()]}},  # unchanged
+        ]
+    )
+    with pytest.raises(NetgearError, match="did not stick"):
+        await api.async_set_port_speed(9, "100", "full")
+
+
+async def test_port_edits_are_serialized() -> None:
+    """Concurrent port edits run whole, never interleaved.
+
+    Rename and speed change each read the row and echo its other settings
+    back; interleaved, the later write would restore stale values. Both
+    paths share the port-edit lock, so each edit's requests stay
+    contiguous even when the event loop offers a chance to interleave.
+    """
+    import asyncio
+    from itertools import groupby
+    from unittest.mock import AsyncMock
+
+    api = NetgearJsonV2Api("host", "pw")
+    order: list[str] = []
+
+    async def fake_request(
+        cgi: str, cmd: str, body: str | None = None, params: dict | None = None
+    ) -> dict:
+        order.append(asyncio.current_task().get_name())
+        await asyncio.sleep(0)  # a real await point where the other task could run
+        if cgi == "get.cgi":
+            return {"data": {"ports": [_port_speed_row(speed="100", duplex=1)]}}
+        return {"status": "ok"}
+
+    api._authed_request = AsyncMock(side_effect=fake_request)
+    speed = asyncio.get_running_loop().create_task(
+        api.async_set_port_speed(9, "100", "full"), name="speed"
+    )
+    rename = asyncio.get_running_loop().create_task(
+        api.async_set_port_name(9, "uplink"), name="rename"
+    )
+    await asyncio.gather(speed, rename)
+
+    assert len(order) == 5  # 3 speed requests + 2 rename requests
+    assert len([k for k, _ in groupby(order)]) == 2, order
+
+
+async def test_set_port_speed_validation() -> None:
+    """Invalid combinations are refused before anything touches the switch."""
+    from unittest.mock import AsyncMock
+
+    api = NetgearJsonV2Api("host", "pw")
+    api._authed_request = AsyncMock()
+    with pytest.raises(NetgearError, match="Invalid speed"):
+        await api.async_set_port_speed(9, "2500")
+    with pytest.raises(NetgearError, match="explicit speed and duplex"):
+        await api.async_set_port_speed(9, "100", "auto", autoneg=False)
+    with pytest.raises(NetgearError, match="half duplex"):
+        await api.async_set_port_speed(9, "1000", "half")
+    api._authed_request.assert_not_awaited()
+
+
 async def test_set_port_name_aj4_error_status() -> None:
     """A non-ok answer to the rename write raises."""
     from unittest.mock import AsyncMock

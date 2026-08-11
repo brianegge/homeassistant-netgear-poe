@@ -24,6 +24,12 @@ DEFAULT_TRAP_TOPIC: Final = "snmptrap2mqtt"
 SERVICE_SET_PORT_NAME: Final = "set_port_name"
 SERVICE_GET_VLAN_MEMBERSHIP: Final = "get_vlan_membership"
 SERVICE_SET_VLAN_MEMBERSHIP: Final = "set_vlan_membership"
+SERVICE_SET_PORT_SPEED: Final = "set_port_speed"
+
+# HA-facing choices for set_port_speed; switch.py strips the "M" suffix
+# before handing the bare rate to the API layer.
+PORT_SPEEDS: Final[list[str]] = ["auto", "10M", "100M", "1000M"]
+PORT_DUPLEXES: Final[list[str]] = ["auto", "half", "full"]
 
 # HA-facing names for the api.py VLAN_* membership states (and read-only
 # "dynamic" for state 3, which writes map to "none" like the switch UI does).

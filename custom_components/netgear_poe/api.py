@@ -241,6 +241,12 @@ class NetgearPoeApi:
     # (verified live on a GS728TPPv3 6.2.x; both JSON generations share their
     # command set). The other web UI generations don't implement it yet.
     supports_vlan_membership = True
+    # Link speed/duplex configuration. Only the aj4 generation implements it
+    # so far: this firmware's port-edit form (port_portEdit) does echo
+    # adminSpeed/adminDuplex, but the labels a forced speed posts are
+    # unverified on a live switch, so guessing here could rewrite a port's
+    # link config wrong. See NetgearJsonV2Api.async_set_port_speed.
+    supports_port_speed = False
 
     def __init__(
         self,
@@ -268,6 +274,10 @@ class NetgearPoeApi:
         # single-port changes can't each start from the same map and clobber
         # one another (see async_set_vlan_port_membership).
         self._vlan_lock = asyncio.Lock()
+        # Serializes port-row edits (rename, speed): each reads the row and
+        # echoes its other settings back, so concurrent edits of the same
+        # switch could otherwise restore stale values over one another.
+        self._port_edit_lock = asyncio.Lock()
         self._port_names: dict[int, str] = {}
         self._poll_count = 0
         # Fetch port names over the web CGI; disabled when SNMP (ifAlias) is
@@ -551,34 +561,48 @@ class NetgearPoeApi:
         """Set a port's description (the switch UI name / SNMP ifAlias).
 
         The edit form echoes the port's link settings alongside the new
-        description, so the current port_port row is fetched first.
+        description, so the current port_port row is fetched first — under
+        the port-edit lock, so a concurrent edit can't be echoed stale.
         """
-        result = await self._authed_request(_GET_CGI, "port_port")
-        row: dict[str, Any] | None = None
-        for index, candidate in enumerate(result.get("data", {}).get("ports", [])):
-            if int(candidate.get("ifindex", index + 1)) == port:
-                row = candidate
-                break
-        if row is None:
-            raise NetgearError(f"Port {port} not found")
-        fields = {
-            "portList": quote(str(row.get("portName", port)), safe=""),
-            "descp": quote(name, safe=""),
-            "adminStatus": _port_edit_value(row, "adminStatus"),
-            "adminSpeed": _port_edit_value(row, "adminSpeed"),
-            "adminDuplex": _port_edit_value(row, "adminDuplex"),
-            "adminFlowCtrl": _port_edit_value(row, "adminFlowCtrl"),
-            "xsrf": "undefined",
-        }
-        result = await self._authed_request(
-            _SET_CGI, "port_portEdit", self._form_body(fields)
-        )
+        async with self._port_edit_lock:
+            result = await self._authed_request(_GET_CGI, "port_port")
+            row: dict[str, Any] | None = None
+            for index, candidate in enumerate(result.get("data", {}).get("ports", [])):
+                if int(candidate.get("ifindex", index + 1)) == port:
+                    row = candidate
+                    break
+            if row is None:
+                raise NetgearError(f"Port {port} not found")
+            fields = {
+                "portList": quote(str(row.get("portName", port)), safe=""),
+                "descp": quote(name, safe=""),
+                "adminStatus": _port_edit_value(row, "adminStatus"),
+                "adminSpeed": _port_edit_value(row, "adminSpeed"),
+                "adminDuplex": _port_edit_value(row, "adminDuplex"),
+                "adminFlowCtrl": _port_edit_value(row, "adminFlowCtrl"),
+                "xsrf": "undefined",
+            }
+            result = await self._authed_request(
+                _SET_CGI, "port_portEdit", self._form_body(fields)
+            )
         if result.get("status") != "ok":
             raise NetgearError(f"Port name set failed: {result}")
         if name:
             self._port_names[port] = name
         else:
             self._port_names.pop(port, None)
+
+    async def async_set_port_speed(
+        self, port: int, speed: str, duplex: str = "auto", autoneg: bool = True
+    ) -> None:
+        """Set a port's link speed/duplex; only some generations support it.
+
+        Callers gate on `supports_port_speed`; this base raises so an
+        unsupported backend fails loudly rather than silently doing nothing.
+        """
+        raise NetgearError(
+            f"Port speed control is not implemented for {type(self).__name__}"
+        )
 
     async def _async_lag_count(self) -> int:
         """How many LAG slots trail the physical ports in port-indexed arrays.
