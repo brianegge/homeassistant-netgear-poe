@@ -376,6 +376,43 @@ async def test_set_port_speed_detects_ignored_write() -> None:
         await api.async_set_port_speed(9, "100", "full")
 
 
+async def test_port_edits_are_serialized() -> None:
+    """Concurrent port edits run whole, never interleaved.
+
+    Rename and speed change each read the row and echo its other settings
+    back; interleaved, the later write would restore stale values. Both
+    paths share the port-edit lock, so each edit's requests stay
+    contiguous even when the event loop offers a chance to interleave.
+    """
+    import asyncio
+    from itertools import groupby
+    from unittest.mock import AsyncMock
+
+    api = NetgearJsonV2Api("host", "pw")
+    order: list[str] = []
+
+    async def fake_request(
+        cgi: str, cmd: str, body: str | None = None, params: dict | None = None
+    ) -> dict:
+        order.append(asyncio.current_task().get_name())
+        await asyncio.sleep(0)  # a real await point where the other task could run
+        if cgi == "get.cgi":
+            return {"data": {"ports": [_port_speed_row(speed="100", duplex=1)]}}
+        return {"status": "ok"}
+
+    api._authed_request = AsyncMock(side_effect=fake_request)
+    speed = asyncio.get_running_loop().create_task(
+        api.async_set_port_speed(9, "100", "full"), name="speed"
+    )
+    rename = asyncio.get_running_loop().create_task(
+        api.async_set_port_name(9, "uplink"), name="rename"
+    )
+    await asyncio.gather(speed, rename)
+
+    assert len(order) == 5  # 3 speed requests + 2 rename requests
+    assert len([k for k, _ in groupby(order)]) == 2, order
+
+
 async def test_set_port_speed_validation() -> None:
     """Invalid combinations are refused before anything touches the switch."""
     from unittest.mock import AsyncMock

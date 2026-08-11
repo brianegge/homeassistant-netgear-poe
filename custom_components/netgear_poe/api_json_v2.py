@@ -141,21 +141,25 @@ class NetgearJsonV2Api(NetgearPoeApi):
         is addressed by a 0-based selEntry index — all per the switch's own
         switch_ports_port.html formEdit(). The base implementation would
         refuse with "Port settings incomplete" on every port here.
+
+        Held under the port-edit lock: the write echoes the row's link
+        settings, so a concurrent speed change could otherwise be undone.
         """
-        row = await self._async_port_row(port)
-        fields = {
-            "descp": quote(name, safe=""),
-            "trap": row.get("trap", 1),
-            "admin": row.get("admin", 1),
-            "autoNego": row.get("autoNego", 1),
-            "speed": row.get("speed", "Auto"),
-            "duplex": row.get("duplex", 2),
-            "flowCtrl": row.get("flowCtrl", 0),
-            "selEntry": port - 1,
-        }
-        result = await self._authed_request(
-            _SET_CGI, "port_port", self._form_body(fields)
-        )
+        async with self._port_edit_lock:
+            row = await self._async_port_row(port)
+            fields = {
+                "descp": quote(name, safe=""),
+                "trap": row.get("trap", 1),
+                "admin": row.get("admin", 1),
+                "autoNego": row.get("autoNego", 1),
+                "speed": row.get("speed", "Auto"),
+                "duplex": row.get("duplex", 2),
+                "flowCtrl": row.get("flowCtrl", 0),
+                "selEntry": port - 1,
+            }
+            result = await self._authed_request(
+                _SET_CGI, "port_port", self._form_body(fields)
+            )
         if result.get("status") != "ok":
             raise NetgearError(f"Port name set failed: {result}")
         if name:
@@ -188,23 +192,27 @@ class NetgearJsonV2Api(NetgearPoeApi):
             )
         if speed == "1000" and duplex == "half":
             raise NetgearError("1000M does not support half duplex")
-        row = await self._async_port_row(port)
-        fields = {
-            "descp": quote(str(row.get("descp", "")), safe=""),
-            "trap": row.get("trap", 1),
-            "admin": row.get("admin", 1),
-            "autoNego": 1 if autoneg else 0,
-            "speed": _SPEED_WIRE[speed],
-            "duplex": _DUPLEX_WIRE[duplex],
-            "flowCtrl": row.get("flowCtrl", 0),
-            "selEntry": port - 1,
-        }
-        result = await self._authed_request(
-            _SET_CGI, "port_port", self._form_body(fields)
-        )
-        if result.get("status") != "ok":
-            raise NetgearError(f"Port speed set failed: {result}")
-        after = await self._async_port_row(port)
+        # The whole read-write-readback runs under the port-edit lock so a
+        # concurrent rename (which echoes link settings) or another speed
+        # change can't interleave and restore stale values.
+        async with self._port_edit_lock:
+            row = await self._async_port_row(port)
+            fields = {
+                "descp": quote(str(row.get("descp", "")), safe=""),
+                "trap": row.get("trap", 1),
+                "admin": row.get("admin", 1),
+                "autoNego": 1 if autoneg else 0,
+                "speed": _SPEED_WIRE[speed],
+                "duplex": _DUPLEX_WIRE[duplex],
+                "flowCtrl": row.get("flowCtrl", 0),
+                "selEntry": port - 1,
+            }
+            result = await self._authed_request(
+                _SET_CGI, "port_port", self._form_body(fields)
+            )
+            if result.get("status") != "ok":
+                raise NetgearError(f"Port speed set failed: {result}")
+            after = await self._async_port_row(port)
         wanted = (1 if autoneg else 0, _SPEED_WIRE[speed], _DUPLEX_WIRE[duplex])
         got = (
             int(after.get("autoNego", -1)),
