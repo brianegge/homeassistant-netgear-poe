@@ -241,6 +241,12 @@ class NetgearPoeApi:
     # (verified live on a GS728TPPv3 6.2.x; both JSON generations share their
     # command set). The other web UI generations don't implement it yet.
     supports_vlan_membership = True
+    # Link speed/duplex configuration. Only the aj4 generation implements it
+    # so far: this firmware's port-edit form (port_portEdit) does echo
+    # adminSpeed/adminDuplex, but the labels a forced speed posts are
+    # unverified on a live switch, so guessing here could rewrite a port's
+    # link config wrong. See NetgearJsonV2Api.async_set_port_speed.
+    supports_port_speed = False
 
     def __init__(
         self,
@@ -579,6 +585,18 @@ class NetgearPoeApi:
             self._port_names[port] = name
         else:
             self._port_names.pop(port, None)
+
+    async def async_set_port_speed(
+        self, port: int, speed: str, duplex: str = "auto", autoneg: bool = True
+    ) -> None:
+        """Set a port's link speed/duplex; only some generations support it.
+
+        Callers gate on `supports_port_speed`; this base raises so an
+        unsupported backend fails loudly rather than silently doing nothing.
+        """
+        raise NetgearError(
+            f"Port speed control is not implemented for {type(self).__name__}"
+        )
 
     async def _async_lag_count(self) -> int:
         """How many LAG slots trail the physical ports in port-indexed arrays.

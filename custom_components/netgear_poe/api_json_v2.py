@@ -42,8 +42,18 @@ _SET_CGI = "set.cgi"
 _LOGGER = logging.getLogger(__name__)
 
 
+# The aj4 port_port wire encoding for link settings, per the switch's own
+# switch_ports_port.html: speed is a string ("Auto" or a bare Mbit/s number;
+# comma lists like "10,100" are multi-speed advertisements), duplex is an
+# enum (0 half, 1 full, 2 auto), autoNego a 0/1 flag.
+_SPEED_WIRE = {"auto": "Auto", "10": "10", "100": "100", "1000": "1000"}
+_DUPLEX_WIRE = {"half": 0, "full": 1, "auto": 2}
+
+
 class NetgearJsonV2Api(NetgearPoeApi):
     """Async PoE client for the aj4 JSON-CGI web UI (GS728TPPv3 6.2.x)."""
+
+    supports_port_speed = True
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -113,6 +123,14 @@ class NetgearJsonV2Api(NetgearPoeApi):
                 "Could not fetch the xsrf token from %s", self.host, exc_info=True
             )
 
+    async def _async_port_row(self, port: int) -> dict[str, Any]:
+        """Return the port_port row for a port, matched by its ifindex."""
+        result = await self._authed_request(_GET_CGI, "port_port")
+        for index, candidate in enumerate(result.get("data", {}).get("ports", [])):
+            if int(candidate.get("ifindex", index + 1)) == port:
+                return candidate
+        raise NetgearError(f"Port {port} not found")
+
     async def async_set_port_name(self, port: int, name: str) -> None:
         """Set a port's description (aj4 wire format).
 
@@ -124,14 +142,7 @@ class NetgearJsonV2Api(NetgearPoeApi):
         switch_ports_port.html formEdit(). The base implementation would
         refuse with "Port settings incomplete" on every port here.
         """
-        result = await self._authed_request(_GET_CGI, "port_port")
-        row: dict[str, Any] | None = None
-        for index, candidate in enumerate(result.get("data", {}).get("ports", [])):
-            if int(candidate.get("ifindex", index + 1)) == port:
-                row = candidate
-                break
-        if row is None:
-            raise NetgearError(f"Port {port} not found")
+        row = await self._async_port_row(port)
         fields = {
             "descp": quote(name, safe=""),
             "trap": row.get("trap", 1),
@@ -151,6 +162,60 @@ class NetgearJsonV2Api(NetgearPoeApi):
             self._port_names[port] = name
         else:
             self._port_names.pop(port, None)
+
+    async def async_set_port_speed(
+        self, port: int, speed: str, duplex: str = "auto", autoneg: bool = True
+    ) -> None:
+        """Set a port's link speed and duplex (aj4 wire format).
+
+        With autoneg on, a specific speed restricts what the port
+        advertises — the peer keeps negotiating and lands on that rate with
+        the right duplex, so this is the safe way to pin a marginal link
+        (no duplex-mismatch risk). autoneg off hard-forces speed/duplex and
+        requires both to be explicit, mirroring the switch UI's validation.
+        The description and every other port setting are preserved.
+
+        The switch's own page also refuses speeds other than Auto/1000 on
+        its fiber (SFP) ports; that rule lives in client-side JS, so here
+        the firmware gets the final say — a write it ignores fails the
+        read-back verification below.
+        """
+        if speed not in _SPEED_WIRE or duplex not in _DUPLEX_WIRE:
+            raise NetgearError(f"Invalid speed {speed!r} / duplex {duplex!r}")
+        if not autoneg and (speed == "auto" or duplex == "auto"):
+            raise NetgearError(
+                "Disabling autonegotiation requires an explicit speed and duplex"
+            )
+        if speed == "1000" and duplex == "half":
+            raise NetgearError("1000M does not support half duplex")
+        row = await self._async_port_row(port)
+        fields = {
+            "descp": quote(str(row.get("descp", "")), safe=""),
+            "trap": row.get("trap", 1),
+            "admin": row.get("admin", 1),
+            "autoNego": 1 if autoneg else 0,
+            "speed": _SPEED_WIRE[speed],
+            "duplex": _DUPLEX_WIRE[duplex],
+            "flowCtrl": row.get("flowCtrl", 0),
+            "selEntry": port - 1,
+        }
+        result = await self._authed_request(
+            _SET_CGI, "port_port", self._form_body(fields)
+        )
+        if result.get("status") != "ok":
+            raise NetgearError(f"Port speed set failed: {result}")
+        after = await self._async_port_row(port)
+        wanted = (1 if autoneg else 0, _SPEED_WIRE[speed], _DUPLEX_WIRE[duplex])
+        got = (
+            int(after.get("autoNego", -1)),
+            str(after.get("speed", "")),
+            int(after.get("duplex", -1)),
+        )
+        if got != wanted:
+            raise NetgearError(
+                f"Port {port} speed did not stick (wanted autoNego/speed/duplex "
+                f"{wanted}, switch reports {got})"
+            )
 
     async def async_logout(self) -> None:
         await super().async_logout()

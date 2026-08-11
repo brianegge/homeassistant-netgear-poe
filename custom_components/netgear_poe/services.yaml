@@ -48,3 +48,43 @@ set_vlan_membership:
             - none
             - untagged
             - tagged
+
+set_port_speed:
+  target:
+    entity:
+      integration: netgear_poe
+      domain: switch
+  fields:
+    speed:
+      required: true
+      example: 100M
+      selector:
+        select:
+          options:
+            - auto
+            - 10M
+            - 100M
+            - 1000M
+    duplex:
+      required: false
+      default: auto
+      example: full
+      selector:
+        select:
+          options:
+            - auto
+            - half
+            - full
+    autoneg:
+      required: false
+      default: true
+      selector:
+        boolean:
+    port:
+      required: false
+      example: 9
+      selector:
+        number:
+          min: 1
+          max: 52
+          mode: box
