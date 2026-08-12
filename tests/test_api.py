@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from base64 import b64decode, b64encode
 from unittest.mock import AsyncMock
 
@@ -634,3 +635,78 @@ async def test_set_vlan_port_membership_serializes_concurrent_writes() -> None:
     )
     assert server[0] == 2  # port 1 change survived
     assert server[1] == 1  # port 2 change survived
+
+
+@pytest.mark.parametrize(
+    ("row", "expected"),
+    [
+        ({"ifindex": 1, "descp": "garage-cam"}, "garage-cam"),
+        ({"ifindex": 1, "description": "garage-cam"}, "garage-cam"),
+        ({"ifindex": 1, "desc": "garage-cam"}, "garage-cam"),
+        ({"ifindex": 1, "portDescr": "garage-cam"}, "garage-cam"),
+        ({"ifindex": 1, "portName": "garage-cam"}, "garage-cam"),
+        ({"ifindex": 1, "name": "garage-cam"}, "garage-cam"),
+        # An empty spelling must not shadow a populated one.
+        ({"ifindex": 1, "descp": "", "description": "garage-cam"}, "garage-cam"),
+    ],
+)
+async def test_port_names_accept_every_description_spelling(
+    row: dict, expected: str
+) -> None:
+    """Generations spell the description field differently; all are read."""
+    api = NetgearPoeApi("host", "pw")
+    api._authed_request = AsyncMock(return_value={"data": {"ports": [row]}})
+
+    assert await api._async_fetch_port_names() == {1: expected}
+
+
+async def test_port_names_read_rows_under_any_list_key() -> None:
+    """The row list is found the tolerant way, not under a hardcoded "ports"."""
+    api = NetgearPoeApi("host", "pw")
+    api._authed_request = AsyncMock(
+        return_value={"data": {"port_port": [{"ifindex": 3, "descp": "Epson"}]}}
+    )
+
+    assert await api._async_fetch_port_names() == {3: "Epson"}
+
+
+async def test_port_names_index_falls_back_past_a_non_numeric_port() -> None:
+    """A row spelling "port" as "g1" still lands on its ifindex."""
+    api = NetgearPoeApi("host", "pw")
+    api._authed_request = AsyncMock(
+        return_value={
+            "data": {"ports": [{"port": "g7", "ifindex": 7, "descp": "Epson"}]}
+        }
+    )
+
+    assert await api._async_fetch_port_names() == {7: "Epson"}
+
+
+async def test_port_names_report_the_keys_when_none_match(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An unknown spelling must say so instead of failing silently.
+
+    Silence here is what left every port named "Port N" with no way to tell
+    a broken parse from a switch that simply has no descriptions set.
+    """
+    api = NetgearPoeApi("host", "pw")
+    api._authed_request = AsyncMock(
+        return_value={"data": {"ports": [{"ifindex": 1, "mysteryField": "garage-cam"}]}}
+    )
+
+    with caplog.at_level(logging.WARNING):
+        assert await api._async_fetch_port_names() == {}
+
+    assert "mysteryField" in caplog.text
+    assert "ifindex" in caplog.text
+
+
+async def test_port_names_stay_quiet_when_the_switch_has_no_descriptions() -> None:
+    """Genuinely blank descriptions are an answer, not a parse failure."""
+    api = NetgearPoeApi("host", "pw")
+    api._authed_request = AsyncMock(
+        return_value={"data": {"ports": [{"ifindex": 1, "descp": ""}]}}
+    )
+
+    assert await api._async_fetch_port_names() == {}

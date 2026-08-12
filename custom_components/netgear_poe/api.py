@@ -459,24 +459,44 @@ class NetgearPoeApi:
 
         Entity names are set from the first poll, so the initial fetch retries
         to ride out a transient switch error (login throttle, a stray 502).
+
+        The rows are located the tolerant way the PoE table is rather than
+        under a hardcoded "ports" key, and the description is read under any
+        spelling the generations use. A response that parses but yields no
+        names is reported with the keys the rows actually carried: the failure
+        is otherwise completely silent and leaves every port named "Port N".
         """
         last_exc: NetgearError | None = None
+        unnamed: list[dict[str, Any]] = []
         for attempt in range(retries + 1):
             try:
                 result = await self._authed_request(_GET_CGI, "port_port")
             except NetgearError as err:
                 last_exc = err
             else:
+                rows = _port_rows(result)
                 names: dict[int, str] = {}
-                for index, row in enumerate(result.get("data", {}).get("ports", [])):
-                    port = int(row.get("ifindex", index + 1))
-                    descp = str(row.get("descp", "")).strip()
+                for index, row in enumerate(rows):
+                    descp = _row_port_name(row)
                     if descp:
-                        names[port] = descp
+                        names[_row_port_index(row, index + 1)] = descp
                 if names:
                     return names
+                unnamed = rows
             if attempt < retries:
                 await asyncio.sleep(1.5)
+        # Rows that carry a known key but leave it blank are a switch with no
+        # descriptions set — a real answer. Rows carrying none of the keys are
+        # a parse this driver got wrong, which is the case worth reporting.
+        if unnamed and not any(key in unnamed[0] for key in _PORT_NAME_KEYS):
+            _LOGGER.warning(
+                "Port names on %s could not be read: port_port returned %d "
+                "row(s) carrying none of %s. Keys present: %s",
+                self.host,
+                len(unnamed),
+                ", ".join(_PORT_NAME_KEYS),
+                ", ".join(sorted(unnamed[0])) or "(none)",
+            )
         if last_exc is not None:
             raise last_exc
         return {}
@@ -1070,6 +1090,39 @@ def _port_rows(result: dict[str, Any]) -> list[dict[str, Any]]:
             if isinstance(value, list) and value and isinstance(value[0], dict):
                 return value
     return []
+
+
+# Firmware generations disagree on how the port-config row spells its
+# description and its index, the same way _row_enabled has to accept three
+# spellings of the admin state.
+_PORT_NAME_KEYS = ("descp", "description", "desc", "portDescr", "portName", "name")
+_PORT_INDEX_KEYS = ("ifindex", "ifIndex", "portId", "port")
+
+
+def _row_port_name(row: dict[str, Any]) -> str:
+    """Return a port-config row's description under whichever key it uses."""
+    for key in _PORT_NAME_KEYS:
+        value = row.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
+def _row_port_index(row: dict[str, Any], fallback: int) -> int:
+    """Return a port-config row's port number, falling back to row order.
+
+    "port" is checked last and guarded: some generations spell it "g1" there
+    while carrying the real number in "ifindex".
+    """
+    for key in _PORT_INDEX_KEYS:
+        value = row.get(key)
+        if value is None:
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return fallback
 
 
 def _row_enabled(row: dict[str, Any]) -> bool:
