@@ -441,3 +441,35 @@ async def test_set_port_name_aj4_error_status() -> None:
     )
     with pytest.raises(NetgearError, match="Port name set failed"):
         await api.async_set_port_name(1, "x")
+
+
+async def test_port_row_empty_list_is_not_reported_as_missing() -> None:
+    """The aj4 client shares the "no port list" guard, not a bogus 404.
+
+    Reproduces the live failure on a GS110TPv3: `set_port_name` reported
+    "Port 5 not found" while the switch happily listed port 5 to a fresh
+    session, because an evicted session's reply has no `data` payload.
+    """
+    from unittest.mock import AsyncMock
+
+    api = NetgearJsonV2Api("host", "pw")
+    api._authed_request = AsyncMock(return_value={"status": "ok"})
+
+    with pytest.raises(NetgearError, match="No port list") as err:
+        await api.async_set_port_name(5, "Noah's Ark POE Switch")
+
+    assert "not found" not in str(err.value)
+    assert api._authed_request.await_count == 2
+
+
+async def test_port_row_absent_port_still_reports_not_found() -> None:
+    """A genuinely missing port keeps the original, accurate message."""
+    from unittest.mock import AsyncMock
+
+    api = NetgearJsonV2Api("host", "pw")
+    api._authed_request = AsyncMock(
+        return_value={"data": {"ports": [{"ifindex": 1, "descp": ""}]}}
+    )
+
+    with pytest.raises(NetgearError, match="Port 9 not found"):
+        await api.async_set_port_name(9, "x")

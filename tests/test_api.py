@@ -284,6 +284,48 @@ async def test_set_port_name_unknown_port() -> None:
         await api.async_set_port_name(9, "x")
 
 
+async def test_set_port_name_empty_port_list_is_not_reported_as_missing() -> None:
+    """An empty port list must not masquerade as "Port N not found".
+
+    An evicted web session still answers the read, just without a usable
+    `data` payload. Reporting that as a missing port sends people hunting a
+    cabling or numbering fault that isn't there.
+    """
+    api = NetgearPoeApi("host", "pw")
+    api._authed_request = AsyncMock(return_value={"status": "ok"})
+
+    with pytest.raises(NetgearError, match="No port list") as err:
+        await api.async_set_port_name(1, "cam")
+
+    assert "not found" not in str(err.value)
+    # Retried once with a fresh login before giving up.
+    assert api._authed_request.await_count == 2
+
+
+async def test_set_port_name_retries_once_after_relogin() -> None:
+    """A stale first read is retried with a fresh session and then succeeds."""
+    api = NetgearPoeApi("host", "pw")
+    api._xsid_header = "stale"
+    reads = 0
+
+    async def fake_request(cgi: str, cmd: str, body: str | None = None) -> dict:
+        nonlocal reads
+        if cmd == "port_port":
+            reads += 1
+            # First read comes back from the evicted session with no rows.
+            return {"status": "ok"} if reads == 1 else PORT_PORT_RESPONSE
+        return {"status": "ok"}
+
+    api._authed_request = AsyncMock(side_effect=fake_request)
+
+    await api.async_set_port_name(1, "cam")
+
+    assert reads == 2
+    # The cached session header was dropped so the retry re-authenticated.
+    assert api._xsid_header is None
+    assert api._port_names[1] == "cam"
+
+
 async def test_set_port_name_rejected() -> None:
     """A non-ok set status raises NetgearError and keeps the old cache."""
     api = NetgearPoeApi("host", "pw")

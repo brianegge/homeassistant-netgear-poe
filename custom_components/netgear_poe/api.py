@@ -454,6 +454,24 @@ class NetgearPoeApi:
                 raise NetgearAuthError(f"Re-login failed for {cmd}: {result}")
         return result
 
+    async def _async_read_port_config(self) -> dict[str, Any]:
+        """Read port_port, forcing one re-login if no port list comes back.
+
+        An evicted session answers with a payload `_is_auth_failure` doesn't
+        recognise, so `_authed_request` sees nothing to retry. Dropping the
+        cached session header makes the next call log in again — the same
+        thing a config entry reload used to be needed for.
+        """
+        result = await self._authed_request(_GET_CGI, "port_port")
+        if _port_config_rows(result):
+            return result
+        _LOGGER.debug(
+            "No port list from %s; retrying once with a fresh login", self.host
+        )
+        async with self._login_lock:
+            self._xsid_header = None
+        return await self._authed_request(_GET_CGI, "port_port")
+
     async def _async_fetch_port_names(self, retries: int = 0) -> dict[int, str]:
         """Return {port: assigned description} from the port config page.
 
@@ -585,14 +603,8 @@ class NetgearPoeApi:
         the port-edit lock, so a concurrent edit can't be echoed stale.
         """
         async with self._port_edit_lock:
-            result = await self._authed_request(_GET_CGI, "port_port")
-            row: dict[str, Any] | None = None
-            for index, candidate in enumerate(result.get("data", {}).get("ports", [])):
-                if int(candidate.get("ifindex", index + 1)) == port:
-                    row = candidate
-                    break
-            if row is None:
-                raise NetgearError(f"Port {port} not found")
+            result = await self._async_read_port_config()
+            row = _find_port_row(result, port)
             fields = {
                 "portList": quote(str(row.get("portName", port)), safe=""),
                 "descp": quote(name, safe=""),
@@ -1123,6 +1135,34 @@ def _row_port_index(row: dict[str, Any], fallback: int) -> int:
         except (TypeError, ValueError):
             continue
     return fallback
+
+
+def _port_config_rows(result: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the per-port rows of a port_port response, or [] if absent."""
+    data = result.get("data")
+    rows = data.get("ports") if isinstance(data, dict) else None
+    return rows if isinstance(rows, list) else []
+
+
+def _find_port_row(result: dict[str, Any], port: int) -> dict[str, Any]:
+    """Return the port_port row whose ifindex is `port`.
+
+    Keeps "the switch sent no port list" distinct from "that port isn't in
+    it". A web session the switch has quietly evicted still answers the read,
+    but without a usable `data` payload, and reporting that as "Port N not
+    found" sends people looking for a cabling or port-numbering fault that
+    doesn't exist. The raw response is quoted so the real failure is visible.
+    """
+    rows = _port_config_rows(result)
+    if not rows:
+        raise NetgearError(
+            f"No port list in the port_port response "
+            f"(the switch session may have expired): {result}"
+        )
+    for index, candidate in enumerate(rows):
+        if _row_port_index(candidate, index + 1) == port:
+            return candidate
+    raise NetgearError(f"Port {port} not found")
 
 
 def _row_enabled(row: dict[str, Any]) -> bool:
