@@ -34,7 +34,7 @@ import logging
 from typing import Any
 from urllib.parse import quote
 
-from .api import NetgearError, NetgearPoeApi, form_body
+from .api import NetgearError, NetgearPoeApi, _find_port_row, form_body
 
 _GET_CGI = "get.cgi"
 _SET_CGI = "set.cgi"
@@ -125,11 +125,7 @@ class NetgearJsonV2Api(NetgearPoeApi):
 
     async def _async_port_row(self, port: int) -> dict[str, Any]:
         """Return the port_port row for a port, matched by its ifindex."""
-        result = await self._authed_request(_GET_CGI, "port_port")
-        for index, candidate in enumerate(result.get("data", {}).get("ports", [])):
-            if int(candidate.get("ifindex", index + 1)) == port:
-                return candidate
-        raise NetgearError(f"Port {port} not found")
+        return _find_port_row(await self._async_read_port_config(), port)
 
     async def async_set_port_name(self, port: int, name: str) -> None:
         """Set a port's description (aj4 wire format).
