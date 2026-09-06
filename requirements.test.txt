@@ -1,1 +1,7 @@
-pytest-homeassistant-custom-component>=0.13.357
+# Pinned, not floored: pytest-homeassistant-custom-component depends on an
+# exact Home Assistant release (this one brings homeassistant==2026.9.0), so
+# this line is effectively the Home Assistant pin too. Pinning Home Assistant
+# separately would fight that `==` and break resolution as soon as one of the
+# two moved. Dependabot bumps this weekly, which moves both together and puts
+# every Home Assistant upgrade behind its own PR and CI run.
+pytest-homeassistant-custom-component==0.13.363

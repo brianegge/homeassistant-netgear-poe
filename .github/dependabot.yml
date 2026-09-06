@@ -1,5 +1,8 @@
 version: 2
 updates:
+  # Also the Home Assistant upgrade path: requirements.test.txt pins
+  # pytest-homeassistant-custom-component, which pins an exact Home Assistant
+  # release, so these PRs are what move the version CI tests against.
   - package-ecosystem: "pip"
     directory: "/"
     schedule:
