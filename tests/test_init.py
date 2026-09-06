@@ -46,10 +46,14 @@ async def test_device_registry_entry(
     """Test the device carries the switch's identity, including firmware."""
     await setup_integration(hass, mock_config_entry)
 
-    device = dr.async_get(hass).async_get_device(
-        identifiers={(DOMAIN, mock_config_entry.entry_id)}
+    # async_get_device(identifiers=...) is deprecated and raises from
+    # HA 2026.8; async_entries_for_config_entry works on both sides of that.
+    devices = dr.async_entries_for_config_entry(
+        dr.async_get(hass), mock_config_entry.entry_id
     )
-    assert device is not None
+    assert len(devices) == 1
+    device = devices[0]
+    assert device.identifiers == {(DOMAIN, mock_config_entry.entry_id)}
     assert device.name == MOCK_SYS_NAME
     assert device.model == MOCK_MODEL
     assert device.sw_version == MOCK_FIRMWARE
