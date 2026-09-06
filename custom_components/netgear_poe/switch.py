@@ -81,7 +81,10 @@ async def async_setup_entry(
     platform = entity_platform.async_get_current_platform()
     platform.async_register_entity_service(
         SERVICE_SET_PORT_NAME,
-        {vol.Required(ATTR_NAME): cv.string},
+        {
+            vol.Required(ATTR_NAME): cv.string,
+            vol.Optional(ATTR_PORT): vol.All(vol.Coerce(int), vol.Range(min=1, max=52)),
+        },
         "async_set_port_name",
     )
     platform.async_register_entity_service(
@@ -153,28 +156,38 @@ class NetgearPoePortSwitch(NetgearPoePortEntity, SwitchEntity):
         """Disable PoE power on this port."""
         await self._async_set_enabled(False)
 
-    async def async_set_port_name(self, name: str) -> None:
-        """Set the port's description on the switch (set_port_name action).
+    async def async_set_port_name(self, name: str, port: int | None = None) -> None:
+        """Set a port's description on the switch (set_port_name action).
 
         Entity names include the description and are rebuilt on each state
         write, so they follow the rename from the next poll. The entity_id
         was generated when the entity was first added and does not change.
+
+        Defaults to the targeted entity's own port; `port` redirects the
+        rename to another port of the same switch. That is how ports with no
+        entity of their own — the uplink and SFP ports, which are never PoE
+        ports — get named: target any port entity of the switch and name the
+        uplink port explicitly.
         """
+        target_port = port if port is not None else self._port
         try:
-            await self.coordinator.api.async_set_port_name(self._port, name)
+            await self.coordinator.api.async_set_port_name(target_port, name)
         except NetgearError as err:
             raise HomeAssistantError(
                 translation_domain=DOMAIN,
                 translation_key="set_port_name_failed",
                 translation_placeholders={
-                    "port": str(self._port),
+                    "port": str(target_port),
                     "host": self.coordinator.api.host,
                     "error": str(err),
                 },
             ) from err
-        port_data = self.port_data
-        if port_data is not None:
-            port_data.alias = name
+        # Only the entity's own port has cached state to keep in step; a
+        # redirected rename lands on a port this entity doesn't represent.
+        if target_port == self._port:
+            port_data = self.port_data
+            if port_data is not None:
+                port_data.alias = name
         await self.coordinator.async_request_refresh()
 
     async def async_get_vlan_membership(self, vlan: int) -> dict[str, Any]:

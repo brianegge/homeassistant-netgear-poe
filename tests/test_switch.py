@@ -95,6 +95,32 @@ async def test_set_port_name(
     mock_api.async_set_port_name.assert_awaited_with(1, "garage-cam")
 
 
+async def test_set_port_name_port_override(
+    hass: HomeAssistant,
+    mock_api: MagicMock,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """The port override renames a port that has no entity of its own.
+
+    Only PoE ports get entities, so an 8-PoE + 2-uplink switch has nothing
+    to target for ports 9 and 10. Naming them means targeting a PoE port's
+    entity and redirecting with `port`.
+    """
+    await setup_integration(hass, mock_config_entry)
+
+    await hass.services.async_call(
+        DOMAIN,
+        SERVICE_SET_PORT_NAME,
+        {"entity_id": PORT_1_ENTITY, "name": "Ark uplink", "port": 9},
+        blocking=True,
+    )
+    mock_api.async_set_port_name.assert_awaited_with(9, "Ark uplink")
+
+    # The targeted entity still represents port 1, so its cached alias must
+    # not pick up the name that was written to port 9.
+    assert hass.states.get(PORT_1_ENTITY).attributes["port"] == 1
+
+
 async def test_set_port_name_failure(
     hass: HomeAssistant,
     mock_api: MagicMock,

@@ -128,6 +128,10 @@
         "name": {
           "name": "Name",
           "description": "New port description. An empty string clears it."
+        },
+        "port": {
+          "name": "Port",
+          "description": "Switch port to rename instead of the targeted entity's own port. Use this to reach ports without entities, such as uplink and SFP ports."
         }
       }
     },
