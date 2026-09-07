@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from homeassistant.core import HomeAssistant
@@ -215,9 +215,14 @@ async def test_switch_set_failure(
     mock_api: MagicMock,
     mock_config_entry: MockConfigEntry,
 ) -> None:
-    """Test a failed write to the switch raises a HomeAssistantError."""
+    """A failed write raises when there is no SNMP fallback to try.
+
+    With a community configured the write is retried over SNMP first; see
+    test_poe_write_falls_back_to_snmp and its read-only-community sibling.
+    """
     await setup_integration(hass, mock_config_entry)
     mock_api.async_set_port_enabled.side_effect = NetgearError("noAccess")
+    mock_config_entry.runtime_data.coordinator.link_monitor = None
 
     with pytest.raises(HomeAssistantError):
         await hass.services.async_call(
@@ -399,3 +404,73 @@ async def test_web_name_fetch_yields_to_snmp_and_returns_when_it_dies(
     await coordinator.async_refresh()
     await hass.async_block_till_done()
     assert mock_api.web_port_names_enabled is False
+
+
+async def test_poe_write_falls_back_to_snmp(
+    hass: HomeAssistant,
+    mock_api: MagicMock,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """A refused web-UI write is retried over SNMP.
+
+    The S350/cheetah firmware answers reads but rejects the state-changing
+    POST with a bare 403, while still honouring POWER-ETHERNET-MIB writes.
+    """
+    await setup_integration(hass, mock_config_entry)
+    mock_api.async_set_port_enabled.side_effect = NetgearError("403 Forbidden")
+
+    monitor = MagicMock()
+    monitor.async_set_poe_enabled = AsyncMock()
+    mock_config_entry.runtime_data.coordinator.link_monitor = monitor
+
+    # No exception: the SNMP path satisfied the call.
+    await hass.services.async_call(
+        "switch",
+        "turn_off",
+        {"entity_id": PORT_1_ENTITY},
+        blocking=True,
+    )
+    monitor.async_set_poe_enabled.assert_awaited_once_with(1, False)
+
+
+async def test_poe_write_reports_web_error_when_snmp_also_fails(
+    hass: HomeAssistant,
+    mock_api: MagicMock,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """A read-only community must not mask the original web-UI failure."""
+    await setup_integration(hass, mock_config_entry)
+    mock_api.async_set_port_enabled.side_effect = NetgearError("403 Forbidden")
+
+    monitor = MagicMock()
+    monitor.async_set_poe_enabled = AsyncMock(side_effect=RuntimeError("noAccess"))
+    mock_config_entry.runtime_data.coordinator.link_monitor = monitor
+
+    with pytest.raises(HomeAssistantError):
+        await hass.services.async_call(
+            "switch",
+            "turn_off",
+            {"entity_id": PORT_1_ENTITY},
+            blocking=True,
+        )
+
+
+async def test_poe_write_does_not_touch_snmp_when_web_ui_works(
+    hass: HomeAssistant,
+    mock_api: MagicMock,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """The fallback is a last resort, not a second write on every toggle."""
+    await setup_integration(hass, mock_config_entry)
+
+    monitor = MagicMock()
+    monitor.async_set_poe_enabled = AsyncMock()
+    mock_config_entry.runtime_data.coordinator.link_monitor = monitor
+
+    await hass.services.async_call(
+        "switch",
+        "turn_off",
+        {"entity_id": PORT_1_ENTITY},
+        blocking=True,
+    )
+    monitor.async_set_poe_enabled.assert_not_awaited()

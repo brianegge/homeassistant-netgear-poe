@@ -17,6 +17,12 @@ _LOGGER = logging.getLogger(__name__)
 
 OID_IF_OPER_STATUS = "1.3.6.1.2.1.2.2.1.8"
 OID_IF_ALIAS = "1.3.6.1.2.1.31.1.1.1.18"
+# POWER-ETHERNET-MIB pethPsePortAdminEnable, indexed <group>.<port>. It is a
+# TruthValue, so 1 = enabled and 2 = disabled — 0 is rejected.
+OID_PSE_PORT_ADMIN = "1.3.6.1.2.1.105.1.1.1.3"
+PSE_GROUP = 1
+PSE_ENABLED = 1
+PSE_DISABLED = 2
 # ifIndex values above this are LAGs/CPU interfaces, not physical ports
 MAX_PHYSICAL_PORT = 64
 
@@ -111,6 +117,70 @@ class SnmpLinkMonitor:
                     continue
                 result[var_oid[-1]] = var_bind[1]
         return result
+
+    async def async_set_poe_enabled(self, port: int, enabled: bool) -> None:
+        """Set pethPsePortAdminEnable for a port. Raises on any failure.
+
+        The web UI is the primary write path; this exists because some
+        firmware refuses the state-changing POST while still answering SNMP
+        (the S350/cheetah generation returns a bare 403). Requires the
+        configured community to have write access — a read-only community
+        answers noAccess/notWritable, which surfaces as an exception here.
+        """
+        from pysnmp.hlapi.v3arch.asyncio import (
+            CommunityData,
+            ContextData,
+            Integer,
+            ObjectIdentity,
+            ObjectType,
+            UdpTransportTarget,
+            set_cmd,
+        )
+
+        if self._engine is None:
+            loop = asyncio.get_running_loop()
+            self._engine = await loop.run_in_executor(None, _build_engine)
+        oid = f"{OID_PSE_PORT_ADMIN}.{PSE_GROUP}.{port}"
+        value = PSE_ENABLED if enabled else PSE_DISABLED
+        target = await UdpTransportTarget.create((self.host, 161), timeout=5, retries=1)
+        err_indication, err_status, _, var_binds = await set_cmd(
+            self._engine,
+            CommunityData(self._community, mpModel=1),
+            target,
+            ContextData(),
+            ObjectType(ObjectIdentity(oid), Integer(value)),
+        )
+        if err_indication:
+            raise RuntimeError(f"SNMP set {oid} failed: {err_indication}")
+        if err_status:
+            raise RuntimeError(f"SNMP set {oid} rejected: {err_status.prettyPrint()}")
+        # A switch can acknowledge the set and ignore it; confirm the value
+        # actually took rather than reporting a success we did not verify.
+        got = next((int(v[1]) for v in var_binds), None)
+        if got != value:
+            raise RuntimeError(
+                f"SNMP set {oid} did not stick (wanted {value}, got {got})"
+            )
+        _LOGGER.debug("SNMP set %s = %s on %s", oid, value, self.host)
+
+    async def async_power_cycle(self, port: int, off_seconds: float) -> None:
+        """Drop and restore PoE on a port over SNMP.
+
+        Power is restored even if the wait is cancelled, and the restore is
+        retried, so a transient failure cannot leave the port dark.
+        """
+        await self.async_set_poe_enabled(port, False)
+        try:
+            await asyncio.sleep(off_seconds)
+        finally:
+            for attempt in range(3):
+                try:
+                    await self.async_set_poe_enabled(port, True)
+                    break
+                except Exception:
+                    if attempt == 2:
+                        raise
+                    await asyncio.sleep(1)
 
     async def async_close(self) -> None:
         """Shut down the SNMP engine transport."""

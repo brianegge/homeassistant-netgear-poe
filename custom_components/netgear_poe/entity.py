@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Awaitable, Callable
+from typing import Any
+
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import NetgearPoeConfigEntry, NetgearPoeCoordinator
-from .api import PoePort
+from .api import NetgearError, PoePort
 from .const import DOMAIN
+from .snmp import SnmpLinkMonitor
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class NetgearPoeEntity(CoordinatorEntity[NetgearPoeCoordinator]):
@@ -76,3 +83,38 @@ class NetgearPoePortEntity(NetgearPoeEntity):
         if port_data is not None and port_data.alias:
             return f"Port {self._port} ({port_data.alias})"
         return f"Port {self._port}"
+
+    async def _async_snmp_fallback(
+        self,
+        action: Callable[[SnmpLinkMonitor], Awaitable[Any]],
+        http_error: NetgearError,
+    ) -> bool:
+        """Retry a failed web-UI write over SNMP. True if it succeeded.
+
+        Some firmware answers reads happily but refuses the state-changing
+        POST — the S350/cheetah generation returns a bare 403 — while still
+        honouring POWER-ETHERNET-MIB writes. Falling back keeps PoE control
+        working there instead of failing outright.
+
+        Only reached after the web UI has already failed, and only when a
+        community is configured. A read-only community simply fails too, and
+        the original web-UI error is what gets reported.
+        """
+        monitor = self.coordinator.link_monitor
+        if monitor is None:
+            return False
+        try:
+            await action(monitor)
+        except Exception as snmp_err:
+            _LOGGER.debug(
+                "SNMP fallback also failed on %s: %s",
+                self.coordinator.api.host,
+                snmp_err,
+            )
+            return False
+        _LOGGER.warning(
+            "Web UI write failed on %s (%s); succeeded over SNMP instead",
+            self.coordinator.api.host,
+            http_error,
+        )
+        return True

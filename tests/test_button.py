@@ -39,9 +39,10 @@ async def test_power_cycle_failure(
     mock_api: MagicMock,
     mock_config_entry: MockConfigEntry,
 ) -> None:
-    """Test failure during power cycle raises."""
+    """Failure raises when there is no SNMP fallback to try."""
     await setup_integration(hass, mock_config_entry)
     mock_api.async_power_cycle_port.side_effect = NetgearError("timeout")
+    mock_config_entry.runtime_data.coordinator.link_monitor = None
 
     with pytest.raises(HomeAssistantError):
         await hass.services.async_call(

@@ -294,15 +294,20 @@ class NetgearPoePortSwitch(NetgearPoePortEntity, SwitchEntity):
         try:
             await self.coordinator.api.async_set_port_enabled(self._port, enabled)
         except NetgearError as err:
-            raise HomeAssistantError(
-                translation_domain=DOMAIN,
-                translation_key="set_port_failed",
-                translation_placeholders={
-                    "port": str(self._port),
-                    "host": self.coordinator.api.host,
-                    "error": str(err),
-                },
-            ) from err
+            if await self._async_snmp_fallback(
+                lambda mon: mon.async_set_poe_enabled(self._port, enabled), err
+            ):
+                pass
+            else:
+                raise HomeAssistantError(
+                    translation_domain=DOMAIN,
+                    translation_key="set_port_failed",
+                    translation_placeholders={
+                        "port": str(self._port),
+                        "host": self.coordinator.api.host,
+                        "error": str(err),
+                    },
+                ) from err
         port_data = self.port_data
         if port_data is not None:
             port_data.admin_enabled = enabled
