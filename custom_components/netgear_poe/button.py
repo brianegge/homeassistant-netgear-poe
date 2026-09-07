@@ -12,6 +12,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import NetgearPoeConfigEntry, NetgearPoeCoordinator
 from .api import NetgearError
+from .api_base_ui import _POWER_CYCLE_OFF_SECONDS
 from .const import DOMAIN
 from .entity import NetgearPoeEntity, NetgearPoePortEntity
 
@@ -93,13 +94,17 @@ class NetgearPoePowerCycleButton(NetgearPoePortEntity, ButtonEntity):
         try:
             await api.async_power_cycle_port(self._port)
         except NetgearError as err:
-            raise HomeAssistantError(
-                translation_domain=DOMAIN,
-                translation_key="power_cycle_failed",
-                translation_placeholders={
-                    "port": str(self._port),
-                    "host": api.host,
-                    "error": str(err),
-                },
-            ) from err
+            if not await self._async_snmp_fallback(
+                lambda mon: mon.async_power_cycle(self._port, _POWER_CYCLE_OFF_SECONDS),
+                err,
+            ):
+                raise HomeAssistantError(
+                    translation_domain=DOMAIN,
+                    translation_key="power_cycle_failed",
+                    translation_placeholders={
+                        "port": str(self._port),
+                        "host": api.host,
+                        "error": str(err),
+                    },
+                ) from err
         await self.coordinator.async_request_refresh()
