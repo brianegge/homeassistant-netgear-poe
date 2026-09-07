@@ -6,6 +6,10 @@ on:
       - main
     paths:
       - "custom_components/**"
+  # The push trigger only fires for custom_components/**, so a release that was
+  # missed (or a change outside that path that still needs shipping) has no way
+  # to be cut otherwise.
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -14,9 +18,7 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      # The version bump this job pushes lands in custom_components/**, which
-      # would retrigger this workflow. One release per day breaks that loop and
-      # keeps a busy merge day from minting a tag per merge.
+      # One release per day keeps a busy merge day from minting a tag per merge.
       - name: Check for existing release today
         id: daily_check
         env:
@@ -43,38 +45,29 @@ jobs:
           version=$(jq -r .version custom_components/netgear_poe/manifest.json)
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      - name: Check if release already exists
-        if: steps.daily_check.outputs.skip != 'true'
-        id: check
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          if gh release view "v${{ steps.current.outputs.version }}" > /dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Bump patch version
-        if: steps.daily_check.outputs.skip != 'true'
-        id: bump
-        run: |
-          IFS='.' read -r major minor patch <<< "${{ steps.current.outputs.version }}"
-          new_version="${major}.${minor}.$((patch + 1))"
-          echo "version=$new_version" >> "$GITHUB_OUTPUT"
-
-      # Ship the manifest version as-is when it has no tag yet, so a hand-made
-      # minor/major bump releases under its own number; otherwise take the next
-      # patch.
+      # main is protected, so this job cannot push a bump commit back and the
+      # manifest in the repo lags the published tags. Ship a hand-made manifest
+      # bump as-is while it has no tag yet — that is how a minor/major release
+      # is cut — and otherwise take the next patch from the LATEST PUBLISHED
+      # TAG. Basing the bump on the manifest instead would recompute the same
+      # number on every run once the manifest stops moving.
       - name: Determine release version
         if: steps.daily_check.outputs.skip != 'true'
         id: version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [ "${{ steps.check.outputs.exists }}" = "true" ]; then
-            echo "version=${{ steps.bump.outputs.version }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=${{ steps.current.outputs.version }}" >> "$GITHUB_OUTPUT"
+          current="${{ steps.current.outputs.version }}"
+          if ! gh release view "v$current" > /dev/null 2>&1; then
+            echo "Manifest version v$current is unreleased; shipping it as-is."
+            echo "version=$current" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          latest=$(gh api "repos/${{ github.repository }}/releases/latest" \
+            --jq .tag_name | sed 's/^v//')
+          IFS='.' read -r major minor patch <<< "$latest"
+          echo "Latest tag v$latest; releasing the next patch."
+          echo "version=${major}.${minor}.$((patch + 1))" >> "$GITHUB_OUTPUT"
 
       # Reusing a tag silently rewrites an already-published release (it moves
       # the tag and replaces the asset), so refuse instead of overwriting.
@@ -88,6 +81,8 @@ jobs:
             exit 1
           fi
 
+      # Working tree only — this is what puts the right version inside the
+      # released zip. It is deliberately never committed; see above.
       # Rewrite just the version line: `jq` would reformat the whole manifest
       # (it expands the single-element arrays onto their own lines).
       - name: Update manifest version
@@ -96,19 +91,6 @@ jobs:
           manifest=custom_components/netgear_poe/manifest.json
           sed -i -E 's/("version": ")[^"]+(")/\1${{ steps.version.outputs.version }}\2/' "$manifest"
           jq -e --arg v "${{ steps.version.outputs.version }}" '.version == $v' "$manifest" > /dev/null
-
-      # Committing the bump back to main is what keeps the manifest in step with
-      # the published tags; without it every run recomputes the same "next"
-      # version and overwrites the previous release.
-      - name: Commit version bump
-        if: steps.daily_check.outputs.skip != 'true' && steps.version.outputs.version != steps.current.outputs.version
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add custom_components/netgear_poe/manifest.json
-          git diff --cached --quiet && exit 0
-          git commit -m "Bump version to ${{ steps.version.outputs.version }}"
-          git push
 
       - name: Create release zip
         if: steps.daily_check.outputs.skip != 'true'
