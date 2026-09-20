@@ -4,4 +4,4 @@
 # separately would fight that `==` and break resolution as soon as one of the
 # two moved. Dependabot bumps this weekly, which moves both together and puts
 # every Home Assistant upgrade behind its own PR and CI run.
-pytest-homeassistant-custom-component==0.13.364
+pytest-homeassistant-custom-component==0.13.365
