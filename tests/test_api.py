@@ -752,3 +752,39 @@ async def test_port_names_stay_quiet_when_the_switch_has_no_descriptions() -> No
     )
 
     assert await api._async_fetch_port_names() == {}
+
+
+async def test_power_cycle_relogs_in_when_session_was_evicted() -> None:
+    """A session the switch evicted answers {"logout": true, "reason": "notAuth"}.
+
+    Seen on a GS3xx after the web session lapsed: every poe_port read came
+    back as that payload, so power cycles failed with "No PoE ports in
+    poe_port response" until the config entry was reloaded. The payload is
+    an auth failure and must trigger the one re-login _authed_request does.
+    """
+    api = NetgearPoeApi("host", "pw")
+    api.web_port_names_enabled = False
+    api._xsid_header = {"X-CSRF-XSID": "stale"}
+    api.async_login = AsyncMock()
+    evicted = {"logout": True, "reason": "notAuth"}
+    port_rows = {"data": {"ports": [{"port": 1, "state": 1, "power": 0}]}}
+    api._request = AsyncMock(
+        side_effect=[evicted, port_rows, {"status": "ok"}]
+    )
+
+    await api.async_power_cycle_port(1)
+
+    api.async_login.assert_awaited_once()
+    assert api._request.await_args_list[2].args[1] == "poe_portReset"
+
+
+async def test_evicted_session_still_fails_after_one_relogin() -> None:
+    """If the fresh login is evicted too, give up with NetgearAuthError."""
+    api = NetgearPoeApi("host", "pw")
+    api._xsid_header = {"X-CSRF-XSID": "stale"}
+    api.async_login = AsyncMock()
+    evicted = {"logout": True, "reason": "notAuth"}
+    api._request = AsyncMock(side_effect=[evicted, evicted])
+
+    with pytest.raises(NetgearAuthError):
+        await api.async_get_data()

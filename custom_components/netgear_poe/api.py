@@ -1083,11 +1083,23 @@ def _parse_dual_status(result: dict[str, Any]) -> DualImageStatus:
 
 
 def _is_auth_failure(result: dict[str, Any]) -> bool:
+    """True when the switch is telling us the session is no longer valid.
+
+    Besides the ``status``/``msgType`` spellings, a session the switch has
+    evicted (idle timeout, or an admin logging in from a browser) answers
+    every command with ``{"logout": true, "reason": "notAuth"}``. Before this
+    was recognised, ``poe_port`` reads on the poll and power-cycle path raised
+    "No PoE ports in poe_port response" instead of re-logging in, and the
+    entry stayed broken until it was reloaded.
+    """
     status = str(result.get("status", "")).lower()
     msg = str(result.get("msgType", "")).lower()
+    reason = str(result.get("reason", "")).lower()
     return (
         status in ("unauth", "unauthorized")
         or "login" in msg
+        or bool(result.get("logout"))
+        or "auth" in reason
         or (status == "err" and "auth" in str(result).lower())
     )
 
