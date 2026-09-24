@@ -591,3 +591,41 @@ async def test_progress_upload_streams_and_reports_per_chunk(via: str) -> None:
     assert seen == sorted(set(seen))  # de-duplicated (no repeated percents)
     assert seen[0] >= 20 and seen[-1] <= 59  # within [base, base+span)
     assert payload.size == len(body)  # a plain sized body, not chunked
+
+
+async def test_writes_carry_origin_and_page_referer() -> None:
+    """Cheetah 1.0.0.44 answers 403 to any state-changing POST without Origin.
+
+    Bisected on a GS324TP against a headless-browser capture of a working
+    Power Cycle: the driver's own body is accepted as soon as the POST carries
+    ``Origin: http://<switch>`` alongside the page Referer, and refused
+    without it whatever the body, cookies or prior page loads. Both headers
+    ride on every POST; GETs keep the web_main Referer only.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    def ctx(text: str) -> MagicMock:
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.text = AsyncMock(return_value=text)
+        c = MagicMock()
+        c.__aenter__ = AsyncMock(return_value=resp)
+        c.__aexit__ = AsyncMock(return_value=False)
+        return c
+
+    session = MagicMock()
+    session.get = MagicMock(return_value=ctx("<html>page</html>"))
+    session.post = MagicMock(return_value=ctx("<html>ok</html>"))
+    api = NetgearCheetahApi("host", "pw", session=session)
+    api._logged_in = True
+
+    await api._request("/poeInterfaceConfiguration.html/a1", data={"submit_flag": "8"})
+
+    headers = session.post.call_args.kwargs["headers"]
+    assert headers["Origin"] == "http://host"
+    assert headers["Referer"] == "http://host/poeInterfaceConfiguration.html"
+
+    await api._request("/poeInterfaceConfiguration.html")
+    get_headers = session.get.call_args.kwargs["headers"]
+    assert "Origin" not in get_headers
+    assert get_headers["Referer"] == "http://host/base/web_main.html"
