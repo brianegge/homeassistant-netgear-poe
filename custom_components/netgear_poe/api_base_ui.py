@@ -292,6 +292,11 @@ class NetgearBaseUiApi:
     def _url(self, path: str) -> str:
         return f"{self._scheme}://{self.host}{path}"
 
+    @property
+    def _origin(self) -> str:
+        """The Origin header value a browser sends for this switch."""
+        return self._url("")
+
     # The login form's location and its exact field set. Subclasses for
     # later firmware (the S350 "cheetah" UI) override these: the switch
     # rejects a body carrying fields the form doesn't define.
@@ -354,11 +359,22 @@ class NetgearBaseUiApi:
         # to an EmWeb action ("page.html/a1") is refered from the page itself,
         # so drop the trailing "/aN"; base-UI POSTs have none and are
         # unaffected.
+        #
+        # Origin on every POST: cheetah firmware 1.0.0.44 refuses any
+        # state-changing POST that lacks it with a bare 403, whatever the
+        # body, cookies or Referer say (bisected on a GS324TP against a
+        # browser capture: the driver's own body succeeds the moment the
+        # header is added). Browsers send it on every form submit, so the
+        # classic UI is unaffected.
         post_referer = re.sub(r"/a\d+$", "", url)
         request = (
             session.get(url, headers={"Referer": self._url("/base/web_main.html")})
             if data is None
-            else session.post(url, data=data, headers={"Referer": post_referer})
+            else session.post(
+                url,
+                data=data,
+                headers={"Referer": post_referer, "Origin": self._origin},
+            )
         )
         try:
             async with request as resp:
@@ -1258,7 +1274,10 @@ class NetgearCheetahApi(NetgearBaseUiApi):
             async with self._get_session().post(
                 url,
                 data=payload,
-                headers={"Referer": self._url(_CHEETAH_UPLOAD_PATH)},
+                headers={
+                    "Referer": self._url(_CHEETAH_UPLOAD_PATH),
+                    "Origin": self._origin,
+                },
                 timeout=aiohttp.ClientTimeout(total=_FIRMWARE_UPLOAD_TIMEOUT),
             ) as resp:
                 resp.raise_for_status()
