@@ -15,6 +15,7 @@ from homeassistant.config_entries import SOURCE_INTEGRATION_DISCOVERY, ConfigEnt
 from homeassistant.const import CONF_HOST, CONF_PASSWORD, EVENT_HOMEASSISTANT_STARTED
 from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import discovery_flow
 from homeassistant.helpers.device_registry import format_mac
 from homeassistant.helpers.typing import ConfigType
@@ -43,6 +44,9 @@ from .snmp import SnmpLinkMonitor
 from .trap_receiver import SnmpTrapReceiver
 
 _LOGGER = logging.getLogger(__name__)
+
+# A bare `netgear_poe:` in configuration.yaml turns on NSDP discovery; no options.
+CONFIG_SCHEMA = cv.empty_config_schema(DOMAIN)
 _DISCOVERY_STARTED = f"{DOMAIN}_discovery_started"
 
 
