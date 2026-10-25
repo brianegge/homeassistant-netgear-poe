@@ -69,7 +69,12 @@ type NetgearPoeConfigEntry = ConfigEntry[NetgearPoeRuntimeData]
 
 
 class NetgearPoeCoordinator(DataUpdateCoordinator[PoeData]):
-    """Coordinator polling PoE state over the switch's web API."""
+    """Coordinator polling PoE state: over SNMP when it can, else the web API.
+
+    The web API is still what changes anything (enable/disable, power-cycle);
+    reading over SNMP just keeps routine polls off the switch's web server,
+    which on some firmware hangs on the PoE status page.
+    """
 
     def __init__(
         self,
@@ -93,6 +98,10 @@ class NetgearPoeCoordinator(DataUpdateCoordinator[PoeData]):
         self._poe_stall_count = 0
 
     async def _async_update_data(self) -> PoeData:
+        data = await self._async_snmp_poe_data()
+        if data is not None:
+            self._reset_stall()
+            return data
         try:
             data = await self.api.async_get_data()
         except NetgearAuthError as err:
@@ -134,6 +143,29 @@ class NetgearPoeCoordinator(DataUpdateCoordinator[PoeData]):
             ) from err
         self._reset_stall()
         await self._apply_link_info(data)
+        return data
+
+    async def _async_snmp_poe_data(self) -> PoeData | None:
+        """PoE state read entirely over SNMP, or None to use the web API.
+
+        Port names come from ifAlias as on the web path. If SNMP answers PoE
+        but not names, the last-known names are kept so entities don't fall
+        back to "Port N"; with no earlier data (first poll) the web read runs
+        instead, since it brings names of its own.
+        """
+        if self.link_monitor is None:
+            return None
+        data = await self.link_monitor.async_get_poe_data()
+        if data is None:
+            return None
+        data.link, names = await self.link_monitor.async_get_port_info()
+        if not names and self.data is None:
+            return None
+        previous = self.data.ports if self.data is not None else {}
+        for port, port_data in data.ports.items():
+            port_data.alias = names.get(port) or (
+                previous[port].alias if port in previous else ""
+            )
         return data
 
     async def _switch_reachable(self) -> bool:

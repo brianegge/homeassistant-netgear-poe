@@ -87,6 +87,9 @@ def mock_link_monitor() -> Generator[MagicMock]:
         monitor.async_get_port_info = AsyncMock(
             return_value=({1: True, 2: False}, {1: "driveway cam"})
         )
+        # No SNMP PoE by default, so these tests exercise the web read path;
+        # tests of the SNMP path set a PoeData return value.
+        monitor.async_get_poe_data = AsyncMock(return_value=None)
         monitor.async_close = AsyncMock()
         yield monitor
 
