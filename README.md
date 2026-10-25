@@ -12,7 +12,8 @@ ProSAFE-Plus-only models (configured solely via the ProSAFE utility, e.g.
 GS105Ev2, GS108PEv3) do not.
 
 Note: these switches expose only read-only MIB-2 over SNMP, so PoE control
-goes through the same web API the switch's UI uses. Five firmware
+goes through the same web API the switch's UI uses. Reading PoE state uses SNMP
+when a community is configured (see below). Five firmware
 generations are supported and detected automatically — the integration
 probes the switch rather than trusting the model name, since revisions of
 one model (a GS110TP vs a GS110TPv3) can speak different APIs:
@@ -71,10 +72,24 @@ trap receiver on UDP 162 and registers this host as a trap destination on
 the switch, so `linkUp`/`linkDown` events update the link sensors
 instantly (the poll remains a backstop for dropped UDP traps).
 
+With a community configured, routine polls also read **PoE state over SNMP**,
+from the standard POWER-ETHERNET-MIB (per-port enable and detection status,
+total draw) plus a vendor table for per-port watts where the switch has one
+(Netgear FASTPATH on S350 models, Marvell/RADLAN on legacy xui firmware). The
+web UI is then only used to change something (enable/disable, power cycle,
+names, firmware). That keeps polls off the switch's web server, which holds a
+handful of management sessions and, on the GS728TP's final 6.0.1.30 firmware,
+hangs on the PoE status page. If SNMP doesn't answer, or the switch has no
+POWER-ETHERNET-MIB, the poll falls back to the web UI as before. Columns are
+read with batched GETs of known rows rather than walks, since some agents
+(GS728TP) answer each request slowly and time out on bulk walks.
+
 There is also a **PoE controller stalled** problem binary sensor. It turns
 on when the switch keeps answering management reads but its PoE-status query
 hangs for two consecutive polls — a wedged PoE controller (seen after a
-firmware update on the xui switches) that a cold power-cycle clears. Power
+firmware update on the xui switches) that a cold power-cycle clears. When PoE
+is read over SNMP, a hung web PoE page no longer trips it: on the GS728TP
+6.0.1.30 that page hangs even while the PoE controller is working normally. Power
 delivery keeps working while this is on, so it means "a cold reboot is
 needed", not "PoE is down"; point a notification automation at it to be told
 when a switch needs power-cycling.
