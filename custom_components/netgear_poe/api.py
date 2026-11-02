@@ -32,6 +32,7 @@ from urllib.parse import quote
 import aiohttp
 
 from ._upload import _multipart_upload_body
+from .const import WEB_SESSION_IDLE_SECONDS
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -231,7 +232,40 @@ class DualImageStatus:
         return "image2" if self.current_active == "image1" else "image1"
 
 
-class NetgearPoeApi:
+class IdleWebSession:
+    """Mixin letting a web backend drop a session it is only holding idle.
+
+    Reads now come over SNMP (see the coordinator), so a web session exists
+    only to change something and otherwise sits unused until the switch's
+    short idle timeout evicts it — which is what left a stale session able to
+    answer a write with an empty/unauthenticated reply. The design is to hold
+    a session only while it is being used: each backend records every web
+    request through ``_note_web_use`` and the coordinator calls
+    ``async_release_idle_session`` after a poll that did not touch the web UI,
+    which logs the session out once it has been unused for
+    ``WEB_SESSION_IDLE_SECONDS``. A session used within that window (e.g. a
+    write still in flight) is kept.
+    """
+
+    # time.monotonic() of the last web request; 0.0 means "never used", which
+    # reads as long-idle so a release before any use is a no-op logout.
+    _last_web_use: float = 0.0
+
+    def _note_web_use(self) -> None:
+        """Record that the web session was just used."""
+        self._last_web_use = time.monotonic()
+
+    async def async_logout(self) -> None:
+        """End the web session. Each backend implements its own request."""
+        raise NotImplementedError
+
+    async def async_release_idle_session(self) -> None:
+        """Log out if the web session has sat unused past the idle window."""
+        if time.monotonic() - self._last_web_use >= WEB_SESSION_IDLE_SECONDS:
+            await self.async_logout()
+
+
+class NetgearPoeApi(IdleWebSession):
     """Async client for PoE control over the switch's web API."""
 
     # Flash firmware via the file_http_download / file_dualConf / sys_reboot
@@ -442,6 +476,7 @@ class NetgearPoeApi:
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Request with automatic (re)login."""
+        self._note_web_use()
         async with self._login_lock:
             if self._xsid_header is None:
                 await self.async_login()

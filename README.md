@@ -217,9 +217,13 @@ netgear_poe:
 ## Caveats
 
 - The switch allows a limited number of concurrent web sessions with a
-  several-minute idle timeout. The integration holds one session and logs
-  out when unloaded, but logging into the switch web UI may temporarily
-  kick the integration (it re-authenticates automatically) and vice versa.
+  several-minute idle timeout. With SNMP polling configured, routine reads go
+  over SNMP and the integration opens a web session only while it is changing
+  something, logging it out once it has been idle for about a minute — so a
+  slot is normally held only for the moment a change takes. Without SNMP, the
+  integration holds one web session and logs out when the entry is unloaded.
+  Either way, logging into the switch's web UI may briefly kick the
+  integration (it re-authenticates automatically) and vice versa.
 - Port settings (power limit, priority, …) are read and echoed back when
   toggling a port, so they are preserved.
 

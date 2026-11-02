@@ -229,36 +229,20 @@ async def test_power_cycle_retries_restore() -> None:
     assert calls == [False, True, True]
 
 
-async def test_get_data_logs_in_again_after_empty_reply() -> None:
-    """An idle session's empty PoE list gets one fresh login, not a failure."""
+async def test_get_data_raises_on_empty_reply() -> None:
+    """An empty PoE list is a plain failure now; the idle session was already
+    released, so there is no in-line re-login to attempt."""
     api = NetgearLegacyApi("host", "pw")
     api._cookie = "stale"
     empty = (
         '<?xml version="1.0" encoding="UTF-8" ?>'
         "<ResponseData><DeviceConfiguration></DeviceConfiguration></ResponseData>"
     )
-    api._request = AsyncMock(side_effect=[_parse_xml(empty), _parse_xml(POE_LIST_XML)])
-
-    data = await api.async_get_data()
-
-    assert api._request.await_count == 2
-    assert api._cookie is None  # dropped, so _request logged in again
-    assert data.ports[1].admin_enabled is True
-
-
-async def test_get_data_raises_when_fresh_session_is_empty_too() -> None:
-    """An empty list straight after a login is a real failure."""
-    api = NetgearLegacyApi("host", "pw")
-    api._cookie = "stale"
-    empty = (
-        '<?xml version="1.0" encoding="UTF-8" ?>'
-        "<ResponseData><DeviceConfiguration></DeviceConfiguration></ResponseData>"
-    )
-    api._request = AsyncMock(side_effect=[_parse_xml(empty), _parse_xml(empty)])
+    api._request = AsyncMock(return_value=_parse_xml(empty))
 
     with pytest.raises(NetgearError, match="No PoE ports"):
         await api.async_get_data()
-    assert api._request.await_count == 2
+    assert api._request.await_count == 1
 
 
 def _mock_session(location: str | None, body: str = "") -> MagicMock:
@@ -944,3 +928,48 @@ async def test_set_port_name_non_poe_port() -> None:
     assert len(writes) == 1
     assert "<interfaceDescription>Storage Room 24</interfaceDescription>" in writes[0]
     assert "<interfaceID>16</interfaceID>" in writes[0]
+
+
+async def test_logout_sends_logoff_message_and_clears_cookie() -> None:
+    """Logout GETs config/logOff_message.htm with the cookie, then forgets it."""
+    api = NetgearLegacyApi("host", "pw", prefix="csb1234")
+    api._cookie = "live"
+    api._attempt_request = AsyncMock(return_value="")
+
+    await api.async_logout()
+
+    api._attempt_request.assert_awaited_once_with("config/logOff_message.htm", None)
+    assert api._cookie is None
+
+
+async def test_logout_clears_cookie_even_when_request_fails() -> None:
+    """A failed logout still drops the cookie (the slot waits out idle)."""
+    api = NetgearLegacyApi("host", "pw", prefix="csb1234")
+    api._cookie = "live"
+    api._attempt_request = AsyncMock(side_effect=NetgearError("boom"))
+
+    await api.async_logout()
+
+    assert api._cookie is None
+
+
+async def test_logout_without_cookie_is_a_noop() -> None:
+    """With no session there is nothing to log out, so no request is sent."""
+    api = NetgearLegacyApi("host", "pw", prefix="csb1234")
+    api._attempt_request = AsyncMock()
+
+    await api.async_logout()
+
+    api._attempt_request.assert_not_awaited()
+
+
+async def test_close_logs_out() -> None:
+    """async_close logs the session out before closing."""
+    api = NetgearLegacyApi("host", "pw", prefix="csb1234")
+    api._cookie = "live"
+    api._attempt_request = AsyncMock(return_value="")
+
+    await api.async_close()
+
+    api._attempt_request.assert_awaited_once_with("config/logOff_message.htm", None)
+    assert api._cookie is None
