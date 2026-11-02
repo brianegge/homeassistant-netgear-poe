@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from base64 import b64decode, b64encode
 from unittest.mock import AsyncMock
 
@@ -16,6 +17,7 @@ from custom_components.netgear_poe.api import (
     form_body,
     rsa_encrypt,
 )
+from custom_components.netgear_poe.const import WEB_SESSION_IDLE_SECONDS
 
 
 def test_encode_password_layout() -> None:
@@ -768,9 +770,7 @@ async def test_power_cycle_relogs_in_when_session_was_evicted() -> None:
     api.async_login = AsyncMock()
     evicted = {"logout": True, "reason": "notAuth"}
     port_rows = {"data": {"ports": [{"port": 1, "state": 1, "power": 0}]}}
-    api._request = AsyncMock(
-        side_effect=[evicted, port_rows, {"status": "ok"}]
-    )
+    api._request = AsyncMock(side_effect=[evicted, port_rows, {"status": "ok"}])
 
     await api.async_power_cycle_port(1)
 
@@ -788,3 +788,19 @@ async def test_evicted_session_still_fails_after_one_relogin() -> None:
 
     with pytest.raises(NetgearAuthError):
         await api.async_get_data()
+
+
+async def test_release_idle_session_drops_idle_keeps_recent() -> None:
+    """IdleWebSession releases a session only once it has been idle long enough."""
+    api = NetgearPoeApi("host", "pw")
+    api.async_logout = AsyncMock()
+
+    # Just used -> the session is kept.
+    api._note_web_use()
+    await api.async_release_idle_session()
+    api.async_logout.assert_not_awaited()
+
+    # Unused past the idle window -> the session is logged out.
+    api._last_web_use = time.monotonic() - WEB_SESSION_IDLE_SECONDS - 1
+    await api.async_release_idle_session()
+    api.async_logout.assert_awaited_once()
