@@ -151,6 +151,7 @@ def mock_api(
     api.async_power_cycle_port = AsyncMock()
     api.async_reboot = AsyncMock()
     api.async_ensure_trap_destination = AsyncMock()
+    api.async_release_idle_session = AsyncMock()
     api.async_close = AsyncMock()
     with (
         patch(

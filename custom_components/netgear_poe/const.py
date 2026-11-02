@@ -45,6 +45,11 @@ VLAN_MEMBERSHIP_STATES: Final[list[str]] = [
 
 SCAN_INTERVAL_SECONDS: Final = 30
 
+# How long a held-open web session may sit unused before a poll logs it out.
+# Deliberately longer than the 15 s per-request timeout, so a routine poll's
+# release can never log out a web session with a write still in flight.
+WEB_SESSION_IDLE_SECONDS: Final = 20
+
 # Consecutive PoE-read failures (while the switch is otherwise reachable) before
 # the "PoE controller stalled" problem sensor turns on. A wedged PoE controller
 # is a firmware fault a cold power-cycle clears; requiring two polls avoids

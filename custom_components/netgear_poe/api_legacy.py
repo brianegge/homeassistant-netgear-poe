@@ -39,6 +39,7 @@ from .api import (
     VLAN_TAGGED,
     VLAN_UNTAGGED,
     DualImageStatus,
+    IdleWebSession,
     NetgearAuthError,
     NetgearError,
     NetgearPoeApi,
@@ -221,7 +222,7 @@ def _vlan_membership_body(vid: int, sets: list[str], deletes: list[str]) -> str:
     )
 
 
-class NetgearLegacyApi:
+class NetgearLegacyApi(IdleWebSession):
     """Async PoE client for the legacy xui web UI. Mirrors NetgearPoeApi."""
 
     # This backend can flash firmware (see async_install_firmware).
@@ -352,6 +353,7 @@ class NetgearLegacyApi:
         self, path_and_query: str, body: str | None = None
     ) -> ET.Element:
         """Perform a request, logging in (again) as needed."""
+        self._note_web_use()
         for _attempt in (0, 1):
             if self._cookie is None:
                 async with self._login_lock:
@@ -389,13 +391,6 @@ class NetgearLegacyApi:
         """Fetch PoE state for all ports."""
         root = await self._request("wcd?{PoEPSEInterfaceList}")
         interfaces = root.findall(".//PoEPSEInterfaceList/Interface")
-        if not interfaces and self._cookie is not None:
-            # An expired session can get an empty reply rather than a rejection.
-            # Polls read over SNMP now, so a session often sits idle until a write
-            # needs this read; log in again once before calling it a failure.
-            self._cookie = None
-            root = await self._request("wcd?{PoEPSEInterfaceList}")
-            interfaces = root.findall(".//PoEPSEInterfaceList/Interface")
         if not interfaces:
             raise NetgearError("No PoE ports in PoEPSEInterfaceList response")
 
@@ -434,7 +429,20 @@ class NetgearLegacyApi:
         return self._if_names[port]
 
     async def _wcd_set(self, body: str, what: str) -> None:
-        """POST a wcd set body and raise if the switch reports an error."""
+        """POST a wcd set body and raise if the switch reports an error.
+
+        A stale write cannot be mistaken for a success here: verified live on a
+        GS516TP (firmware 6.0.1.30), a good write answers
+        ``<statusCode>0</statusCode>`` ("OK") while a write on an expired/
+        logged-out session answers ``<statusCode>4</statusCode>`` ("Request Is
+        not authenticated"), which this rejects. So the two are distinct and
+        the feared "empty reply looks like a success" does not arise — an
+        unauthenticated reply carries an explicit non-zero code, never an empty
+        one. (The empty "" allowance stays only for a reply that omits
+        ActionStatus entirely, which a rejected session does not send.) In the
+        new design a session is logged out while idle rather than left to go
+        stale, so a write re-authenticates first anyway.
+        """
         root = await self._request("wcd", body=body)
         code = root.findtext(".//ActionStatus/statusCode", "").strip()
         if code not in ("", "0"):
@@ -869,9 +877,36 @@ class NetgearLegacyApi:
             "SNMP trap registration is not supported on this switch model"
         )
 
+    async def async_logout(self) -> None:
+        """End the web session so the switch frees its slot right away.
+
+        The xui UI logs out by fetching ``config/logOff_message.htm`` with the
+        session cookie; the switch tears the session down as it serves that
+        page. Verified live on a GS516TP (firmware 6.0.1.30): after a single
+        authenticated GET of that page the same cookie reads back
+        ``<statusCode>4</statusCode>`` "Request Is not authenticated", and ten
+        back-to-back login/logout cycles all succeed, so the slot is freed
+        immediately rather than waiting out the idle timeout. Earlier versions
+        of this backend sent no logout at all and left the slot to expire on
+        its own.
+
+        Sent through ``_attempt_request`` (not ``_request``) so a session that
+        is already gone is not revived by a re-login just to log it out. The
+        cookie is always cleared, as the other backends do; a failed request
+        only means the slot waits out its idle timeout.
+        """
+        if self._cookie is None:
+            return
+        try:
+            await self._attempt_request("config/logOff_message.htm", None)
+        except NetgearError:
+            _LOGGER.debug("Logout request failed on %s", self.host, exc_info=True)
+        finally:
+            self._cookie = None
+
     async def async_close(self) -> None:
-        """Close the HTTP session if we own it."""
-        self._cookie = None
+        """Log out and close the HTTP session if we own it."""
+        await self.async_logout()
         if self._owns_session and self._session is not None:
             await self._session.close()
             self._session = None

@@ -314,3 +314,39 @@ async def test_read_with_candidates_never_walks() -> None:
     assert await monitor._read(OID_PSE_PORT_ADMIN, wanted) == {1: 1, 2: 2}
     assert "walk" not in calls
     assert monitor._rows[OID_PSE_PORT_ADMIN] == [(1, 1), (1, 2)]
+
+
+async def test_snmp_poll_releases_idle_web_session(
+    hass: HomeAssistant,
+    mock_api: MagicMock,
+    mock_link_monitor: MagicMock,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """A poll served over SNMP releases the web session if it has gone idle."""
+    mock_link_monitor.async_get_poe_data.return_value = snmp_poe_data()
+    await setup_integration(hass, mock_config_entry)
+    coordinator = mock_config_entry.runtime_data.coordinator
+
+    mock_api.async_release_idle_session.reset_mock()
+    await coordinator.async_refresh()
+
+    mock_api.async_release_idle_session.assert_awaited()
+    mock_api.async_get_data.assert_not_called()
+
+
+async def test_web_fallback_poll_keeps_its_session(
+    hass: HomeAssistant,
+    mock_api: MagicMock,
+    mock_link_monitor: MagicMock,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """A poll that falls back to the web UI keeps its session (no release)."""
+    # mock_link_monitor returns no SNMP PoE by default -> the web read runs.
+    await setup_integration(hass, mock_config_entry)
+    coordinator = mock_config_entry.runtime_data.coordinator
+
+    mock_api.async_release_idle_session.reset_mock()
+    await coordinator.async_refresh()
+
+    mock_api.async_get_data.assert_awaited()
+    mock_api.async_release_idle_session.assert_not_awaited()
