@@ -389,6 +389,13 @@ class NetgearLegacyApi:
         """Fetch PoE state for all ports."""
         root = await self._request("wcd?{PoEPSEInterfaceList}")
         interfaces = root.findall(".//PoEPSEInterfaceList/Interface")
+        if not interfaces and self._cookie is not None:
+            # An expired session can get an empty reply rather than a rejection.
+            # Polls read over SNMP now, so a session often sits idle until a write
+            # needs this read; log in again once before calling it a failure.
+            self._cookie = None
+            root = await self._request("wcd?{PoEPSEInterfaceList}")
+            interfaces = root.findall(".//PoEPSEInterfaceList/Interface")
         if not interfaces:
             raise NetgearError("No PoE ports in PoEPSEInterfaceList response")
 
