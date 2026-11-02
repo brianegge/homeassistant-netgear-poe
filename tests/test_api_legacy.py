@@ -229,6 +229,38 @@ async def test_power_cycle_retries_restore() -> None:
     assert calls == [False, True, True]
 
 
+async def test_get_data_logs_in_again_after_empty_reply() -> None:
+    """An idle session's empty PoE list gets one fresh login, not a failure."""
+    api = NetgearLegacyApi("host", "pw")
+    api._cookie = "stale"
+    empty = (
+        '<?xml version="1.0" encoding="UTF-8" ?>'
+        "<ResponseData><DeviceConfiguration></DeviceConfiguration></ResponseData>"
+    )
+    api._request = AsyncMock(side_effect=[_parse_xml(empty), _parse_xml(POE_LIST_XML)])
+
+    data = await api.async_get_data()
+
+    assert api._request.await_count == 2
+    assert api._cookie is None  # dropped, so _request logged in again
+    assert data.ports[1].admin_enabled is True
+
+
+async def test_get_data_raises_when_fresh_session_is_empty_too() -> None:
+    """An empty list straight after a login is a real failure."""
+    api = NetgearLegacyApi("host", "pw")
+    api._cookie = "stale"
+    empty = (
+        '<?xml version="1.0" encoding="UTF-8" ?>'
+        "<ResponseData><DeviceConfiguration></DeviceConfiguration></ResponseData>"
+    )
+    api._request = AsyncMock(side_effect=[_parse_xml(empty), _parse_xml(empty)])
+
+    with pytest.raises(NetgearError, match="No PoE ports"):
+        await api.async_get_data()
+    assert api._request.await_count == 2
+
+
 def _mock_session(location: str | None, body: str = "") -> MagicMock:
     resp = MagicMock()
     resp.headers = {"Location": location} if location else {}
