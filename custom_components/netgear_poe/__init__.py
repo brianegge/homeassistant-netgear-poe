@@ -101,6 +101,11 @@ class NetgearPoeCoordinator(DataUpdateCoordinator[PoeData]):
         data = await self._async_snmp_poe_data()
         if data is not None:
             self._reset_stall()
+            # This poll read over SNMP, so the web session (if one is held) sat
+            # unused; release it once it has been idle long enough. Only the
+            # SNMP path does this — a web-fallback poll keeps its session, since
+            # it just used it and will again next poll.
+            await self.api.async_release_idle_session()
             return data
         try:
             data = await self.api.async_get_data()

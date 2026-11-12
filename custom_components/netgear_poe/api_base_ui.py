@@ -41,6 +41,7 @@ import aiohttp
 from ._upload import _UPLOAD_CHUNK_BYTES, _multipart_upload_body, _ProgressUpload
 from .api import (
     DualImageStatus,
+    IdleWebSession,
     NetgearAuthError,
     NetgearError,
     PoeData,
@@ -240,7 +241,7 @@ def _image_description(html: str, slot: str) -> str:
     return ""
 
 
-class NetgearBaseUiApi:
+class NetgearBaseUiApi(IdleWebSession):
     """Async PoE client for the classic /base/ web UI. Mirrors NetgearPoeApi."""
 
     # This backend can flash firmware (see async_install_firmware).
@@ -389,6 +390,7 @@ class NetgearBaseUiApi:
 
     async def _request(self, path: str, data: dict[str, str] | None = None) -> str:
         """Perform a request, logging in (again) as needed."""
+        self._note_web_use()
         for _attempt in (0, 1):
             if not self._logged_in:
                 async with self._login_lock:
