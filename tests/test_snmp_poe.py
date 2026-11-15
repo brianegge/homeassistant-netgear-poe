@@ -135,6 +135,29 @@ async def test_snmp_poll_keeps_last_names_when_ifalias_missing(
     mock_api.async_get_data.assert_not_called()
 
 
+async def test_snmp_poll_keeps_every_port_name(
+    hass: HomeAssistant,
+    mock_api: MagicMock,
+    mock_link_monitor: MagicMock,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """Non-PoE ports' ifAlias is kept too, and survives an empty ifAlias read."""
+    mock_link_monitor.async_get_poe_data.return_value = snmp_poe_data()
+    mock_link_monitor.async_get_port_info.return_value = (
+        {1: True, 2: False, 11: True},
+        {1: "driveway cam", 11: "Shure 1&2"},
+    )
+    await setup_integration(hass, mock_config_entry)
+    coordinator = mock_config_entry.runtime_data.coordinator
+    assert coordinator.data.link[11] is True
+    assert coordinator.data.port_names == {1: "driveway cam", 11: "Shure 1&2"}
+
+    mock_link_monitor.async_get_poe_data.return_value = snmp_poe_data()
+    mock_link_monitor.async_get_port_info.return_value = ({1: True, 11: True}, {})
+    await coordinator.async_refresh()
+    assert coordinator.data.port_names[11] == "Shure 1&2"
+
+
 # ---------------------------------------------------------------- SNMP reader
 
 
