@@ -973,3 +973,130 @@ async def test_close_logs_out() -> None:
 
     api._attempt_request.assert_awaited_once_with("config/logOff_message.htm", None)
     assert api._cookie is None
+
+
+def _trap_xml(*entries: tuple[str, str, str]) -> str:
+    """An {SNMPTrap} reply, shaped like a GS516TP's, with (ip, community, ver)."""
+    rows = "".join(
+        "<SNMPTrapReceiverEntry>"
+        f"<receiverIPAddress>{ip}</receiverIPAddress>"
+        "<notificationType>1</notificationType>"
+        f"<communityString>{community}</communityString>"
+        f"<SNMPVersion>{version}</SNMPVersion>"
+        "<UDPPortNo>162</UDPPortNo><filterEnabled>0</filterEnabled>"
+        "<filterName></filterName><timeout>0</timeout><retries>0</retries>"
+        "</SNMPTrapReceiverEntry>"
+        for ip, community, version in entries
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8" ?><ResponseData><DeviceConfiguration>'
+        '<version>1.0</version><SNMPTrap type="section"><enabled>1</enabled>'
+        f"<SNMPTrapReceiverList>{rows}</SNMPTrapReceiverList></SNMPTrap>"
+        "</DeviceConfiguration><ActionStatus><requestURL>SNMPTrap</requestURL>"
+        "<statusCode></statusCode></ActionStatus></ResponseData>"
+    )
+
+
+# What the Trap Configuration page's Add button posts (captured live from a
+# GS516TP's own page template, then sent as-is by this backend).
+TRAP_ADD_BODY = (
+    "<?xml version='1.0' encoding='utf-8'?>"
+    '<DeviceConfiguration><SNMPTrap action="set">'
+    "<enabled>1</enabled><SNMPTrapReceiverList><SNMPTrapReceiverEntry>"
+    "<receiverIPAddress>192.168.1.4</receiverIPAddress>"
+    "<communityString>jesselee</communityString>"
+    "<SNMPVersion>2</SNMPVersion>"
+    "</SNMPTrapReceiverEntry></SNMPTrapReceiverList>"
+    "</SNMPTrap></DeviceConfiguration>"
+)
+
+TRAP_FLAGS_HTML = (
+    '<INPUT  TYPE=HIDDEN NAME="rndAlarmEnabling"   value="{all}" SIZE="20">'
+    '<INPUT  TYPE=HIDDEN NAME="snmpEnableAuthenTraps"   value="1" SIZE="20">'
+)
+
+
+def _trap_api(*replies: str, flags_all: str = "1") -> NetgearLegacyApi:
+    api = NetgearLegacyApi("host", "pw")
+    api._request = AsyncMock(side_effect=[_parse_xml(r) for r in replies])
+    api._request_text = AsyncMock(return_value=TRAP_FLAGS_HTML.format(all=flags_all))
+    return api
+
+
+async def test_trap_destination_added_when_absent() -> None:
+    """An empty table gets exactly the entry the switch's own UI would post."""
+    api = _trap_api(_trap_xml(), SET_OK_XML)
+    await api.async_ensure_trap_destination("192.168.1.4", "jesselee")
+
+    assert api._request.await_args_list[0].args == ("wcd?{SNMPTrap}",)
+    post = api._request.await_args_list[1]
+    assert post.args == ("wcd",)
+    assert post.kwargs["body"] == TRAP_ADD_BODY
+    # Trap flags are only read (to warn), never written.
+    api._request_text.assert_awaited_once_with("System/SNMP/TrapFlags.htm")
+
+
+async def test_trap_destination_noop_when_present() -> None:
+    """Already registered (v2c, same community): nothing is posted."""
+    api = _trap_api(_trap_xml(("192.168.1.4", "jesselee", "2")))
+    await api.async_ensure_trap_destination("192.168.1.4", "jesselee")
+    assert api._request.await_count == 1  # the read only
+
+
+async def test_trap_destination_leaves_other_receivers_alone() -> None:
+    """Other receivers stay out of the post; the section merges on the switch."""
+    api = _trap_api(
+        _trap_xml(("10.0.0.9", "public", "1"), ("10.0.0.10", "other", "2")),
+        SET_OK_XML,
+    )
+    await api.async_ensure_trap_destination("192.168.1.4", "jesselee")
+    body = api._request.await_args_list[1].kwargs["body"]
+    assert body == TRAP_ADD_BODY
+    assert "10.0.0.9" not in body
+    assert 'action="delete"' not in body
+
+
+async def test_trap_destination_same_ip_other_settings_not_modified() -> None:
+    """Someone's own entry for that IP is never overwritten."""
+    api = _trap_api(_trap_xml(("192.168.1.4", "public", "1")))
+    with pytest.raises(NetgearError, match="different settings"):
+        await api.async_ensure_trap_destination("192.168.1.4", "jesselee")
+    assert api._request.await_count == 1  # no write
+
+
+async def test_trap_destination_write_failure_raises() -> None:
+    """A switch-reported error (e.g. a full table) surfaces as NetgearError."""
+    api = _trap_api(_trap_xml(), SET_FAIL_XML)
+    with pytest.raises(NetgearError, match="Trap receiver add failed"):
+        await api.async_ensure_trap_destination("192.168.1.4", "jesselee")
+
+
+async def test_trap_destination_unreadable_table_raises() -> None:
+    """A reply without the section (stale session) is not an empty table."""
+    stale = (
+        '<?xml version="1.0" encoding="UTF-8" ?><ResponseData><ActionStatus>'
+        "<statusCode>4</statusCode><statusString>Request Is not authenticated"
+        "</statusString></ActionStatus></ResponseData>"
+    )
+    api = _trap_api(stale)
+    with pytest.raises(NetgearError, match="statusCode=4"):
+        await api.async_ensure_trap_destination("192.168.1.4", "jesselee")
+    assert api._request.await_count == 1  # never wrote a duplicate
+
+
+async def test_trap_destination_warns_when_all_traps_disabled(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The flags are left as configured, but "All traps off" is called out."""
+    api = _trap_api(_trap_xml(), SET_OK_XML, flags_all="2")
+    await api.async_ensure_trap_destination("192.168.1.4", "jesselee")
+    assert "all SNMP traps disabled" in caplog.text
+
+
+async def test_request_text_relogins_and_returns_raw_body() -> None:
+    """HTML pages go through the same login/re-login path as wcd reads."""
+    api = NetgearLegacyApi("host", "pw")
+    api.async_login = AsyncMock(side_effect=lambda: setattr(api, "_cookie", "c"))
+    api._attempt_request = AsyncMock(side_effect=[None, "<html>ok</html>"])
+    assert await api._request_text("System/SNMP/TrapFlags.htm") == "<html>ok</html>"
+    assert api.async_login.await_count == 2

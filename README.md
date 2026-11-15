@@ -28,7 +28,10 @@ one model (a GS110TP vs a GS110TPv3) can speak different APIs:
 - **Legacy XML "xui"** (GS516TP-class, Marvell firmware 6.0.x): the UI
   served under a per-device `/csb<hex>/` path prefix, with data over the
   `wcd` XML endpoint. These switches have no native PoE reset, so power
-  cycling toggles PoE off and back on.
+  cycling toggles PoE off and back on. The SNMP trap destination is
+  registered through the UI's Trap Configuration table (SNMPv2c); the
+  Trap Flags page's **All** switch must be on for link traps to be sent
+  (it is by default, and a warning is logged if it isn't).
 - **Classic HTML** (GS110TP-class, Broadcom firmware 5.4.x): the frames-based
   UI under `/base/`, driven by posting the same forms a browser would. These
   switches have no native PoE reset either, and don't support registering an
@@ -67,7 +70,9 @@ it is a deliberate, disruptive action; press it during a quiet window.
 
 With an SNMP community configured, you also get a per-port **link**
 binary sensor (`connectivity`) from IF-MIB `ifOperStatus`, polled every
-30 s. Enable **Listen for SNMP traps** and the integration also opens a
+30 s. Every front-panel port gets one, PoE or not; the non-PoE ports'
+sensors (uplinks, SFP ports, self-powered gear) are created **disabled**, so
+enable the ones you want under the device's entities. Enable **Listen for SNMP traps** and the integration also opens a
 trap receiver on UDP 162 and registers this host as a trap destination on
 the switch, so `linkUp`/`linkDown` events update the link sensors
 instantly (the poll remains a backstop for dropped UDP traps).

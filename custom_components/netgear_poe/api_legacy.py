@@ -14,6 +14,10 @@ CGI API in api.py. Their web UI is served under a per-device path prefix
   document (curly braces are sent literally; the GoAhead server wants them).
 * Writes: POST /<prefix>/wcd with an XML body:
   <DeviceConfiguration set="set"><PoEPSEInterfaceList action="set" ...>
+* SNMP trap receivers live in the {SNMPTrap} section (the Trap
+  Configuration page, System/SNMP/TrapConf_master.xml). Adding one posts
+  only the new SNMPTrapReceiverEntry under <SNMPTrap action="set"> — the
+  section merges, so existing receivers are left as they are.
 * Firmware: two flash slots ({ImageUnitList}). An upgrade is a multipart
   upload of Netgear's .ros archive to Maintenance/httpConfigProcess.htm,
   which the switch writes to the inactive slot by itself (the form has no
@@ -92,6 +96,15 @@ _DETECTION_STATUS = {
     "6": "otherfault",
 }
 _POWER_CYCLE_OFF_SECONDS = 3
+
+# Trap Configuration (SNMPTrap section). SNMPVersion 1 = SNMPv1, 2 = SNMPv2
+# (v2c); the section-wide <enabled> is the global SNMP-notification switch.
+_TRAP_VERSION_V2C = "2"
+# Trap Flags page: rndAlarmEnabling is its "All" radio (1 = enable,
+# 2 = disable), the master switch for every trap type, link up/down included.
+# The page has no separate link-trap flag.
+_TRAP_FLAGS_PAGE = "System/SNMP/TrapFlags.htm"
+_ALARM_ENABLING_RE = re.compile(r'NAME="rndAlarmEnabling"\s+value="(\d+)"', re.I)
 
 # Firmware transfer. "File Download" is Netgear's name for a download *to* the
 # switch; file_type 8 = Archive (the flashable .ros).
@@ -353,6 +366,10 @@ class NetgearLegacyApi(IdleWebSession):
         self, path_and_query: str, body: str | None = None
     ) -> ET.Element:
         """Perform a request, logging in (again) as needed."""
+        return _parse_xml(await self._request_text(path_and_query, body))
+
+    async def _request_text(self, path_and_query: str, body: str | None = None) -> str:
+        """Like _request, but return the raw body (for the UI's HTML pages)."""
         self._note_web_use()
         for _attempt in (0, 1):
             if self._cookie is None:
@@ -361,7 +378,7 @@ class NetgearLegacyApi(IdleWebSession):
                         await self.async_login()
             text = await self._attempt_request(path_and_query, body)
             if text is not None:
-                return _parse_xml(text)
+                return text
             self._cookie = None
         raise NetgearAuthError("Session rejected after re-login")
 
@@ -871,11 +888,83 @@ class NetgearLegacyApi(IdleWebSession):
         report(100)
         _LOGGER.info("%s is now running firmware %s", self.host, version)
 
+    async def _async_read_trap_receivers(self) -> list[dict[str, str]]:
+        """The switch's SNMP trap receivers, as {field: text} per entry."""
+        root = await self._request("wcd?{SNMPTrap}")
+        section = root.find(".//SNMPTrap")
+        if section is None:
+            # A rejected session answers 200 with a statusCode and no data;
+            # never mistake that for an empty receiver table.
+            code = root.findtext(".//ActionStatus/statusCode", "").strip()
+            raise NetgearError(
+                f"Could not read the trap receiver table (statusCode={code or '?'})"
+            )
+        return [
+            {child.tag: (child.text or "").strip() for child in entry}
+            for entry in section.iter("SNMPTrapReceiverEntry")
+        ]
+
     async def async_ensure_trap_destination(self, dest_ip: str, community: str) -> None:
-        """Trap registration is not implemented for the legacy UI."""
-        raise NetgearError(
-            "SNMP trap registration is not supported on this switch model"
+        """Register an enabled SNMPv2c trap destination; a no-op if present.
+
+        Mirrors what the Trap Configuration page's Add button posts (reverse-
+        engineered from its TrapConf_master.xml template and the xui page
+        framework, which prunes unchanged rows from the post): just the new
+        SNMPTrapReceiverEntry plus the section's required <enabled> flag,
+        under <SNMPTrap action="set">. The section merges, so other
+        receivers are untouched. Verified live on a GS516TP (6.0.x).
+
+        The receiver table is read first: a matching v2c entry for this IP
+        and community means there is nothing to do. An entry for the same IP
+        with another community or version is somebody's own configuration,
+        so it is left alone and this raises rather than overwriting it.
+
+        As in NetgearPoeApi, the trap-type flags (Trap Flags page) are left as
+        configured; their "All" switch also covers link up/down, so a switch
+        with it off is only warned about.
+        """
+        for entry in await self._async_read_trap_receivers():
+            if entry.get("receiverIPAddress") != dest_ip:
+                continue
+            if (
+                entry.get("SNMPVersion") == _TRAP_VERSION_V2C
+                and entry.get("communityString") == community
+            ):
+                _LOGGER.debug("%s already sends v2c traps to %s", self.host, dest_ip)
+                await self._async_warn_if_traps_disabled()
+                return
+            raise NetgearError(
+                f"{self.host} already has a trap receiver {dest_ip} with "
+                f"different settings (version {entry.get('SNMPVersion') or '?'}); "
+                "leaving it unchanged"
+            )
+        body = (
+            "<?xml version='1.0' encoding='utf-8'?>"
+            '<DeviceConfiguration><SNMPTrap action="set">'
+            "<enabled>1</enabled><SNMPTrapReceiverList><SNMPTrapReceiverEntry>"
+            f"<receiverIPAddress>{escape(dest_ip)}</receiverIPAddress>"
+            f"<communityString>{escape(community)}</communityString>"
+            f"<SNMPVersion>{_TRAP_VERSION_V2C}</SNMPVersion>"
+            "</SNMPTrapReceiverEntry></SNMPTrapReceiverList>"
+            "</SNMPTrap></DeviceConfiguration>"
         )
+        await self._wcd_set(body, "Trap receiver add failed")
+        await self._async_warn_if_traps_disabled()
+
+    async def _async_warn_if_traps_disabled(self) -> None:
+        """Log if the Trap Flags "All" switch is off (best-effort read)."""
+        try:
+            page = await self._request_text(_TRAP_FLAGS_PAGE)
+        except NetgearError:
+            _LOGGER.debug("Could not read trap flags on %s", self.host, exc_info=True)
+            return
+        match = _ALARM_ENABLING_RE.search(page)
+        if match is not None and match.group(1) != "1":
+            _LOGGER.warning(
+                "%s has all SNMP traps disabled (Trap Flags > All); link "
+                "up/down traps will not be sent until it is enabled",
+                self.host,
+            )
 
     async def async_logout(self) -> None:
         """End the web session so the switch frees its slot right away.
