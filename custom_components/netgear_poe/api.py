@@ -156,6 +156,9 @@ class PoeData:
     consumption_watts: float | None = None
     # Per-port link state from SNMP; empty when SNMP is unavailable
     link: dict[int, bool] = field(default_factory=dict)
+    # SNMP ifAlias for every port, PoE or not — names the link sensors of
+    # ports that have no PoE data (and so no PoePort.alias).
+    port_names: dict[int, str] = field(default_factory=dict)
 
 
 # 802.1Q membership states, as the vlan_membership CGI encodes them. Reads can

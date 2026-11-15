@@ -166,6 +166,7 @@ class NetgearPoeCoordinator(DataUpdateCoordinator[PoeData]):
         data.link, names = await self.link_monitor.async_get_port_info()
         if not names and self.data is None:
             return None
+        self._apply_port_names(data, names)
         previous = self.data.ports if self.data is not None else {}
         for port, port_data in data.ports.items():
             port_data.alias = names.get(port) or (
@@ -194,6 +195,7 @@ class NetgearPoeCoordinator(DataUpdateCoordinator[PoeData]):
         if self.link_monitor is None:
             return
         data.link, names = await self.link_monitor.async_get_port_info()
+        self._apply_port_names(data, names)
         # SNMP ifAlias is the same source LibreNMS uses and needs no web
         # login, so prefer it for port names when available. A hung agent
         # returns no names at all, which leaves each port on the web CGI
@@ -208,6 +210,17 @@ class NetgearPoeCoordinator(DataUpdateCoordinator[PoeData]):
         # first poll read stay cached on the API and keep feeding the aliases,
         # so the fallback is in place before it is ever needed.
         self.api.web_port_names_enabled = not names
+
+    def _apply_port_names(self, data: PoeData, names: dict[int, str]) -> None:
+        """Record every port's ifAlias, keeping the last-known names on a miss.
+
+        PoE ports also carry their name on PoePort.alias; this map covers the
+        non-PoE ports too, whose link sensors have no PoePort to read it from.
+        """
+        if names:
+            data.port_names = dict(names)
+        elif self.data is not None and data is not self.data:
+            data.port_names = dict(self.data.port_names)
 
     @callback
     def apply_link_trap(self, port: int, up: bool) -> None:
