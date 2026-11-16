@@ -87,7 +87,9 @@ JSON generation. Only the probe is authoritative.
   `snmp_trapConfgAdd`, `home_logout`. The switch limits concurrent web
   sessions with an idle timeout — always log out.
 - **Legacy xui PoE control** — XML over `/<prefix>/wcd?{PoEPSEInterfaceList}`;
-  see the module docstring in `api_legacy.py`.
+  see the module docstring in `api_legacy.py`. Trap receivers are the
+  `{SNMPTrap}` section (`SNMPTrapReceiverEntry`, `SNMPVersion` 2 = v2c);
+  adding one posts only the new entry, as the vendor page does.
 - **Classic /base/ PoE control** — HTML form posts, scraped by column header;
   see the module docstring in `api_base_ui.py`. The switch answers `400` if a
   posted body carries a field that page's form doesn't define, so each form

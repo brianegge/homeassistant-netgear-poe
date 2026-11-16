@@ -78,10 +78,17 @@ class NetgearPoePortEntity(NetgearPoeEntity):
         return f"{self._port_label()} {self._name_suffix}".strip()
 
     def _port_label(self) -> str:
-        """Return a friendly label like 'Port 3 (camera)'."""
+        """Return a friendly label like 'Port 3 (camera)'.
+
+        PoE ports are named from their PoE data; a port without any (a
+        non-PoE port's link sensor) falls back to its SNMP ifAlias.
+        """
         port_data = self.port_data
-        if port_data is not None and port_data.alias:
-            return f"Port {self._port} ({port_data.alias})"
+        alias = port_data.alias if port_data is not None else ""
+        if not alias and self.coordinator.data is not None:
+            alias = self.coordinator.data.port_names.get(self._port, "")
+        if alias:
+            return f"Port {self._port} ({alias})"
         return f"Port {self._port}"
 
     async def _async_snmp_fallback(
