@@ -93,9 +93,13 @@ class SnmpTrapReceiver:
             up = trap_oid == OID_LINK_UP
             _LOGGER.debug("Trap: port %d link %s", if_index, "up" if up else "down")
             self._on_link_change(if_index, up)
-        elif trap_oid == OID_PETH_PSE_PORT_NOTIFY and self._on_poe_event is not None:
-            if if_index is not None and if_index <= MAX_PHYSICAL_PORT:
-                self._on_poe_event(if_index)
+        elif (
+            trap_oid == OID_PETH_PSE_PORT_NOTIFY
+            and self._on_poe_event is not None
+            and if_index is not None
+            and if_index <= MAX_PHYSICAL_PORT
+        ):
+            self._on_poe_event(if_index)
 
     async def async_stop(self) -> None:
         """Close the UDP listener."""
