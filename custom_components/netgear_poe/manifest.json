@@ -2,6 +2,7 @@
   "domain": "netgear_poe",
   "name": "Netgear PoE Switch",
   "after_dependencies": ["mqtt"],
+  "categories": ["computers_network.routers_network", "computers_network.monitoring"],
   "codeowners": ["@brianegge"],
   "config_flow": true,
   "dependencies": ["network"],
