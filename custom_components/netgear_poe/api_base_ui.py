@@ -48,6 +48,7 @@ from .api import (
     PoePort,
     SwitchInfo,
     _insecure_connector,
+    holds_web_session,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -256,6 +257,7 @@ class NetgearBaseUiApi(IdleWebSession):
         session: aiohttp.ClientSession | None = None,
         use_https: bool = False,
     ) -> None:
+        super().__init__()
         self.host = host
         self._password = password
         self._session = session
@@ -388,9 +390,9 @@ class NetgearBaseUiApi(IdleWebSession):
             return None
         return text
 
+    @holds_web_session
     async def _request(self, path: str, data: dict[str, str] | None = None) -> str:
         """Perform a request, logging in (again) as needed."""
-        self._note_web_use()
         for _attempt in (0, 1):
             if not self._logged_in:
                 async with self._login_lock:
@@ -764,6 +766,7 @@ class NetgearBaseUiApi(IdleWebSession):
             + (f" (last reported {observed})" if observed else "")
         )
 
+    @holds_web_session
     async def async_install_firmware(
         self,
         image: bytes,
@@ -1383,6 +1386,7 @@ class NetgearCheetahApi(NetgearBaseUiApi):
         if reason:
             raise NetgearError(f"Switch refused to reboot: {reason}")
 
+    @holds_web_session
     async def async_install_firmware(
         self,
         image: bytes,

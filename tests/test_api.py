@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from base64 import b64decode, b64encode
@@ -15,8 +16,14 @@ from custom_components.netgear_poe.api import (
     NetgearPoeApi,
     encode_password,
     form_body,
+    holds_web_session,
     rsa_encrypt,
 )
+from custom_components.netgear_poe.api_base_ui import (
+    NetgearBaseUiApi,
+    NetgearCheetahApi,
+)
+from custom_components.netgear_poe.api_legacy import NetgearLegacyApi
 from custom_components.netgear_poe.const import WEB_SESSION_IDLE_SECONDS
 
 
@@ -804,3 +811,103 @@ async def test_release_idle_session_drops_idle_keeps_recent() -> None:
     api._last_web_use = time.monotonic() - WEB_SESSION_IDLE_SECONDS - 1
     await api.async_release_idle_session()
     api.async_logout.assert_awaited_once()
+
+
+async def test_release_leaves_session_in_use_alone() -> None:
+    """An operation in flight keeps its session however long it has run."""
+    api = NetgearPoeApi("host", "pw")
+    api.async_logout = AsyncMock()
+
+    async with api._web_session_in_use():
+        # Started long ago by the idle clock, but still running.
+        api._last_web_use = time.monotonic() - WEB_SESSION_IDLE_SECONDS - 1
+        await api.async_release_idle_session()
+        api.async_logout.assert_not_awaited()
+
+    # Finishing counts as a use, so the idle window starts over.
+    await api.async_release_idle_session()
+    api.async_logout.assert_not_awaited()
+
+
+async def test_request_outliving_idle_window_is_not_logged_out() -> None:
+    """A slow request is held by the decorator, not by when it started."""
+    api = NetgearPoeApi("host", "pw")
+    api.async_logout = AsyncMock()
+    api._xsid_header = "sid"
+    started = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def slow_request(*_args: object, **_kwargs: object) -> dict[str, object]:
+        started.set()
+        await finish.wait()
+        return {}
+
+    api._request = slow_request
+    request = asyncio.create_task(api._authed_request("get.cgi", "cmd"))
+    await started.wait()
+
+    api._last_web_use = time.monotonic() - WEB_SESSION_IDLE_SECONDS - 1
+    await api.async_release_idle_session()
+    api.async_logout.assert_not_awaited()
+
+    finish.set()
+    await request
+
+
+async def test_request_started_during_release_waits_for_the_logout() -> None:
+    """A request that starts mid-logout logs in afresh once the logout is done.
+
+    Otherwise the logout, resuming afterwards, would forget the session the
+    request had just opened and strand it on the switch.
+    """
+    api = NetgearPoeApi("host", "pw")
+    api._xsid_header = "old"
+    events: list[str] = []
+    logout_started = asyncio.Event()
+    finish_logout = asyncio.Event()
+
+    async def logout() -> None:
+        events.append("logout starts")
+        logout_started.set()
+        await finish_logout.wait()
+        api._xsid_header = None
+        events.append("logout ends")
+
+    async def login() -> None:
+        events.append("login")
+        api._xsid_header = "new"
+
+    async def request(*_args: object, **_kwargs: object) -> dict[str, object]:
+        events.append(f"request on {api._xsid_header}")
+        return {}
+
+    api.async_logout = logout
+    api.async_login = login
+    api._request = request
+
+    release = asyncio.create_task(api.async_release_idle_session())
+    await logout_started.wait()
+    write = asyncio.create_task(api._authed_request("set.cgi", "cmd"))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert events == ["logout starts"]  # the write is waiting
+
+    finish_logout.set()
+    await release
+    await write
+    assert events == ["logout starts", "logout ends", "login", "request on new"]
+    assert api._xsid_header == "new"
+
+
+@pytest.mark.parametrize(
+    "client",
+    [NetgearPoeApi, NetgearBaseUiApi, NetgearCheetahApi, NetgearLegacyApi],
+)
+def test_firmware_install_holds_the_web_session(client: type) -> None:
+    """An install posts its upload directly, so the whole operation is marked."""
+
+    async def unmarked() -> None:
+        """Stand-in to get at the wrapper the decorator puts around a method."""
+
+    marked = holds_web_session(unmarked)
+    assert client.async_install_firmware.__code__ is marked.__code__
