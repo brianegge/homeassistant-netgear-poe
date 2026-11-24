@@ -53,6 +53,7 @@ from .api import (
     VlanMembership,
     _insecure_connector,
     apply_vlan_port_change,
+    holds_web_session,
 )
 from .api_base_ui import NetgearBaseUiApi, NetgearCheetahApi
 from .api_json_v2 import NetgearJsonV2Api
@@ -252,6 +253,7 @@ class NetgearLegacyApi(IdleWebSession):
         prefix: str | None = None,
         use_https: bool = False,
     ) -> None:
+        super().__init__()
         self.host = host
         self._password = password
         self._session = session
@@ -368,9 +370,9 @@ class NetgearLegacyApi(IdleWebSession):
         """Perform a request, logging in (again) as needed."""
         return _parse_xml(await self._request_text(path_and_query, body))
 
+    @holds_web_session
     async def _request_text(self, path_and_query: str, body: str | None = None) -> str:
         """Like _request, but return the raw body (for the UI's HTML pages)."""
-        self._note_web_use()
         for _attempt in (0, 1):
             if self._cookie is None:
                 async with self._login_lock:
@@ -830,6 +832,7 @@ class NetgearLegacyApi(IdleWebSession):
             + (f" (last reported {observed})" if observed else "")
         )
 
+    @holds_web_session
     async def async_install_firmware(
         self,
         image: bytes,

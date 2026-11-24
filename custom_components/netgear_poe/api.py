@@ -18,12 +18,14 @@ the same md5(query) value.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import functools
 import logging
 import re
 import secrets
 import time
 from base64 import b64decode, b64encode
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
 from hashlib import md5
 from typing import Any, Final
@@ -242,30 +244,80 @@ class IdleWebSession:
     only to change something and otherwise sits unused until the switch's
     short idle timeout evicts it — which is what left a stale session able to
     answer a write with an empty/unauthenticated reply. The design is to hold
-    a session only while it is being used: each backend records every web
-    request through ``_note_web_use`` and the coordinator calls
+    a session only while it is being used: each backend marks the operations
+    that use the web UI with ``holds_web_session`` and the coordinator calls
     ``async_release_idle_session`` after a poll that did not touch the web UI,
-    which logs the session out once it has been unused for
-    ``WEB_SESSION_IDLE_SECONDS``. A session used within that window (e.g. a
-    write still in flight) is kept.
+    which logs the session out once nothing is using it and it has been unused
+    for ``WEB_SESSION_IDLE_SECONDS``.
+
+    An operation in flight keeps its session however long it runs. The idle
+    clock alone could not promise that: a write on a slow switch (login, an
+    attempt, a re-login) or a firmware install outlasts any fixed window.
     """
 
-    # time.monotonic() of the last web request; 0.0 means "never used", which
-    # reads as long-idle so a release before any use is a no-op logout.
-    _last_web_use: float = 0.0
+    def __init__(self) -> None:
+        # time.monotonic() when the session was last used; 0.0 means "never
+        # used", which reads as long-idle so a release before any use is a
+        # no-op logout.
+        self._last_web_use = 0.0
+        # Operations holding the session right now (see holds_web_session).
+        self._web_users = 0
+        # Held while a release logs out, so a request that starts meanwhile
+        # waits and logs in afresh instead of riding the dying session (and
+        # having its new session forgotten when the logout finishes).
+        self._release_lock = asyncio.Lock()
 
     def _note_web_use(self) -> None:
         """Record that the web session was just used."""
         self._last_web_use = time.monotonic()
+
+    @contextlib.asynccontextmanager
+    async def _web_session_in_use(self) -> AsyncIterator[None]:
+        """Keep the session from being released for the duration."""
+        async with self._release_lock:
+            self._web_users += 1
+        try:
+            yield
+        finally:
+            self._web_users -= 1
+            # Stamped when the operation ends, not when it starts, so the
+            # idle window is measured from the last moment it was needed.
+            self._note_web_use()
 
     async def async_logout(self) -> None:
         """End the web session. Each backend implements its own request."""
         raise NotImplementedError
 
     async def async_release_idle_session(self) -> None:
-        """Log out if the web session has sat unused past the idle window."""
-        if time.monotonic() - self._last_web_use >= WEB_SESSION_IDLE_SECONDS:
+        """Log out unless the web session is in use or was used just now."""
+        if self._web_users:
+            return
+        if time.monotonic() - self._last_web_use < WEB_SESSION_IDLE_SECONDS:
+            return
+        async with self._release_lock:
+            # An operation may have taken the session while this waited.
+            if self._web_users:
+                return
             await self.async_logout()
+
+
+def holds_web_session[**P, R](
+    func: Callable[P, Coroutine[Any, Any, R]],
+) -> Callable[P, Coroutine[Any, Any, R]]:
+    """Mark an IdleWebSession method as using the web session while it runs.
+
+    Covers whole operations, not just single requests: a firmware install
+    posts its upload directly and then waits, and must not be logged out by
+    a refresh that lands in between.
+    """
+
+    @functools.wraps(func)
+    async def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        this: IdleWebSession = args[0]  # type: ignore[assignment]
+        async with this._web_session_in_use():
+            return await func(*args, **kwargs)
+
+    return wrapper
 
 
 class NetgearPoeApi(IdleWebSession):
@@ -292,6 +344,7 @@ class NetgearPoeApi(IdleWebSession):
         session: aiohttp.ClientSession | None = None,
         use_https: bool = False,
     ) -> None:
+        super().__init__()
         self.host = host
         self._password = password
         self._session = session
@@ -471,6 +524,7 @@ class NetgearPoeApi(IdleWebSession):
             self._hash_param = "hash"
             return await self._request(_SET_CGI, "home_loginAuth", body)
 
+    @holds_web_session
     async def _authed_request(
         self,
         cgi: str,
@@ -479,7 +533,6 @@ class NetgearPoeApi(IdleWebSession):
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Request with automatic (re)login."""
-        self._note_web_use()
         async with self._login_lock:
             if self._xsid_header is None:
                 await self.async_login()
@@ -1007,6 +1060,7 @@ class NetgearPoeApi(IdleWebSession):
                 f"{status.versions.get(status.next_active)})"
             )
 
+    @holds_web_session
     async def async_install_firmware(
         self,
         image: bytes,

@@ -45,9 +45,10 @@ VLAN_MEMBERSHIP_STATES: Final[list[str]] = [
 
 SCAN_INTERVAL_SECONDS: Final = 30
 
-# How long a held-open web session may sit unused before a poll logs it out.
-# Deliberately longer than the 15 s per-request timeout, so a routine poll's
-# release can never log out a web session with a write still in flight.
+# How long a web session may sit unused before a poll logs it out: enough for
+# the next step of a multi-request write to reuse the session. Operations in
+# flight hold the session themselves (see holds_web_session), however long
+# they take, so this window does not have to outlast them.
 WEB_SESSION_IDLE_SECONDS: Final = 20
 
 # Consecutive PoE-read failures (while the switch is otherwise reachable) before
