@@ -776,6 +776,7 @@ class NetgearLegacyApi(IdleWebSession):
             status = root.findtext(".//ActionStatus/statusString", "").strip()
             raise NetgearError(f"Could not activate {slot}: {status or code}")
 
+    @holds_web_session
     async def async_reboot(self) -> None:
         """Reboot the switch (drops PoE and the switch's uplink for ~a minute).
 
