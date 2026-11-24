@@ -975,6 +975,7 @@ class NetgearPoeApi(IdleWebSession):
             ),
         )
 
+    @holds_web_session
     async def async_reboot(self) -> None:
         """Reboot the switch (drops PoE and the switch's uplink for ~a minute).
 

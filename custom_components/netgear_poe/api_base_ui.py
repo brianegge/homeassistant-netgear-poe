@@ -694,6 +694,7 @@ class NetgearBaseUiApi(IdleWebSession):
             reason = _input_value(html, "err_msg") or _UNKNOWN_ERROR
             raise NetgearError(f"Could not activate {slot}: {reason}")
 
+    @holds_web_session
     async def async_reboot(self) -> None:
         """Reboot the switch (drops PoE and the switch's uplink for ~a minute).
 

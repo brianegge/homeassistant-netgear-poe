@@ -911,3 +911,47 @@ def test_firmware_install_holds_the_web_session(client: type) -> None:
 
     marked = holds_web_session(unmarked)
     assert client.async_install_firmware.__code__ is marked.__code__
+
+
+@pytest.mark.parametrize(
+    "client",
+    [NetgearPoeApi, NetgearBaseUiApi, NetgearCheetahApi, NetgearLegacyApi],
+)
+def test_reboot_holds_the_web_session(client: type) -> None:
+    """A reboot logs in and then posts directly, so the whole operation is marked."""
+
+    async def unmarked() -> None:
+        """Stand-in to get at the wrapper the decorator puts around a method."""
+
+    marked = holds_web_session(unmarked)
+    assert client.async_reboot.__code__ is marked.__code__
+
+
+async def test_release_during_reboot_login_keeps_the_session() -> None:
+    """A poll that lands between a reboot's login and its post must not log out.
+
+    The reboot would then go out unauthenticated, and _async_reboot reads the
+    resulting error as the switch going down.
+    """
+    api = NetgearPoeApi("host", "pw")
+    api.async_logout = AsyncMock()
+    api._async_reboot = AsyncMock()
+    login_started = asyncio.Event()
+    finish_login = asyncio.Event()
+
+    async def login() -> None:
+        login_started.set()
+        await finish_login.wait()
+        api._xsid_header = "sid"
+
+    api.async_login = login
+    reboot = asyncio.create_task(api.async_reboot())
+    await login_started.wait()
+
+    api._last_web_use = time.monotonic() - WEB_SESSION_IDLE_SECONDS - 1
+    await api.async_release_idle_session()
+    api.async_logout.assert_not_awaited()
+
+    finish_login.set()
+    await reboot
+    api._async_reboot.assert_awaited_once()
